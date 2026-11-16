@@ -1,0 +1,24 @@
+import mongoose from 'mongoose';
+
+// One master profile per user. Every later tailored resume may only use facts from `data`.
+const profileSchema = new mongoose.Schema(
+  {
+    // Every document carries userId and every query filters by it: this is what makes multi-user possible later.
+    // Users live in Clerk, so this is Clerk's user id string (e.g. "user_2abc…"), not a Mongo ObjectId.
+    userId: { type: String, required: true, unique: true },
+    // The resume as structured JSON. Its shape is defined and validated by Zod (schemas/profile.js),
+    // so Mongo stores it as a plain object instead of repeating the schema here.
+    // Not required: saving preferences before uploading a resume creates a profile without data.
+    data: Object,
+    sourceFileName: String,
+    // The PDF attached to every application email, stored in GridFS (resume/storage.js).
+    resumePdf: { id: mongoose.Schema.Types.ObjectId, name: String, size: Number, savedAt: Date },
+    applyAnswers: Object, // standard answers for application forms, validated by schemas/applyAnswers.js
+    emailsPreparedOn: String, // "2026-11-13": the day the morning emails were last prepared (mail/prepare.js)
+    // Job search preferences, validated by schemas/preferences.js. Kept apart from data so a new upload never wipes them.
+    preferences: Object,
+  },
+  { timestamps: true, minimize: false },
+);
+
+export const Profile = mongoose.model('Profile', profileSchema);

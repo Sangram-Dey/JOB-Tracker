@@ -1,0 +1,92 @@
+@import "tailwindcss";
+
+/* dark: utilities follow the .dark class that next-themes sets, not only the OS setting. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Colour tokens. Components use the names (bg-surface, text-muted…), so dark mode is just a second set of values. */
+:root {
+  --paper: #f3f5f8; /* page background */
+  --surface: #ffffff; /* panels */
+  --sunken: #edf0f5; /* hover, expanded rows */
+  --ink: #14203a; /* text and primary buttons */
+  --muted: #5c6579;
+  --faint: #8a93a6;
+  --line: #dee3ec;
+  --cobalt: #2445c2; /* links, focus */
+  --marigold: #d9980a; /* "fresh" and "unsaved": things that need your eye */
+  --marigold-soft: #fdf3d7;
+  --danger: #c2362b;
+  --ok: #1f7a4d;
+}
+.dark {
+  --paper: #0d1322;
+  --surface: #141c2f;
+  --sunken: #1a2338;
+  --ink: #e6ebf4;
+  --muted: #9aa4ba;
+  --faint: #6e7891;
+  --line: #253049;
+  --cobalt: #93a9ff;
+  --marigold: #f2b632;
+  --marigold-soft: #3a2e10;
+  --danger: #ff8a7f;
+  --ok: #6fd3a0;
+}
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-surface: var(--surface);
+  --color-sunken: var(--sunken);
+  --color-ink: var(--ink);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-line: var(--line);
+  --color-cobalt: var(--cobalt);
+  --color-marigold: var(--marigold);
+  --color-marigold-soft: var(--marigold-soft);
+  --color-danger: var(--danger);
+  --color-ok: var(--ok);
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Bricolage Grotesque", "IBM Plex Sans", ui-sans-serif, sans-serif;
+}
+
+body {
+  @apply bg-paper font-sans text-ink antialiased;
+}
+:focus-visible {
+  outline: 2px solid var(--cobalt);
+  outline-offset: 2px;
+}
+
+@layer components {
+  .input {
+    @apply w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink placeholder:text-faint focus:border-cobalt focus:ring-2 focus:ring-cobalt/20 focus:outline-none;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg bg-ink px-4 py-2 text-sm font-medium text-surface transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40;
+  }
+  .btn-outline {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-line bg-surface px-3 py-1.5 text-sm font-medium text-ink hover:border-muted disabled:opacity-40;
+  }
+  .btn-ghost {
+    @apply inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm text-muted hover:bg-sunken hover:text-ink disabled:opacity-40;
+  }
+  .panel {
+    @apply rounded-2xl border border-line bg-surface;
+  }
+  .label {
+    @apply block text-sm font-medium text-ink;
+  }
+  .help {
+    @apply text-sm text-muted;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}
