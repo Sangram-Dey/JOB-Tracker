@@ -11,12 +11,16 @@ const profileSchema = new mongoose.Schema(
     // Not required: saving preferences before uploading a resume creates a profile without data.
     data: Object,
     sourceFileName: String,
+    uploadedData: Object, // `data` as the last upload read it: the Resume page's "Reset" goes back to this
     // The PDF attached to every application email, stored in GridFS (resume/storage.js).
     resumePdf: { id: mongoose.Schema.Types.ObjectId, name: String, size: Number, savedAt: Date },
     applyAnswers: Object, // standard answers for application forms, validated by schemas/applyAnswers.js
     emailsPreparedOn: String, // "2026-11-13": the day the morning emails were last prepared (mail/prepare.js)
+    summarySentOn: String, // the day the morning summary email was last sent (tracker/summary.js)
     // Job search preferences, validated by schemas/preferences.js. Kept apart from data so a new upload never wipes them.
     preferences: Object,
+    // The Gmail this user sends from (mail/send.js). secret = the app password, encrypted; never selected by default.
+    mailAccount: { provider: String, user: String, secret: { type: String, select: false }, verifiedAt: Date }, // provider: mail/providers.js
   },
   { timestamps: true, minimize: false },
 );

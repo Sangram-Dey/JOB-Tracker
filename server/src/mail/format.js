@@ -1,3 +1,5 @@
+import { allLinks } from '../schemas/profile.js';
+
 // Email bodies are written in a tiny format you can edit as plain text:
 //   blank line = new paragraph, "- " at the start of a line = bullet, **words** = bold.
 // They go out as HTML (formatted) with a plain-text copy for mail apps that don't show HTML.
@@ -9,7 +11,7 @@ const href = (link) => (/^https?:\/\//i.test(link) ? link : `https://${link}`);
 
 export function signatureOf(profile) {
   const c = profile?.contact ?? {};
-  return { name: c.name, line: [c.phone, c.email].filter(Boolean).join(' · '), links: (c.links ?? []).filter(Boolean).slice(0, 3) };
+  return { name: c.name, line: [c.phone, c.email].filter(Boolean).join(' · '), links: allLinks(c).slice(0, 3) };
 }
 
 export function toHtml(body, profile) {

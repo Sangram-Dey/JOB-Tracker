@@ -28,7 +28,7 @@ export const PreferencesSchema = z.object({
   companies: z.object({ greenhouse: boards, lever: boards, ashby: boards }).prefault({}),
   // Job sites searched with your role words. JSearch also needs JSEARCH_API_KEY in server/.env.
   sources: z
-    .object({ freehire: on, remotive: on, remoteok: on, himalayas: on, weworkremotely: on, jsearch: on })
+    .object({ freehire: on, remotive: on, remoteok: on, himalayas: on, weworkremotely: on, jsearch: on, apify: on })
     .prefault({}),
 
   // Feed filters, applied when the feed is shown (routes/jobs.js), so a change shows at once and nothing is deleted.
@@ -36,6 +36,10 @@ export const PreferencesSchema = z.object({
   minSalaryLpa: z.number().min(0).max(1000).nullable().default(null), // lakhs of rupees a year
   yearsExperience: z.number().min(0).max(50).nullable().default(null), // yours; jobs asking more than this + 1 are hidden
   maxAgeDays: z.number().int().min(1).max(90).default(30),
+  // A short email to yourself each morning: replies, ready emails and applications, new jobs.
+  dailySummaryEmail: on,
+  // HR emails and auto-apply send a copy of your resume tailored to each job (resume/tailorJob.js).
+  tailorResume: on,
   platforms: z.array(z.string().regex(/^[a-z0-9]+$/)).default([]), // naukri, indeed, lever…; empty = every platform
 });
 

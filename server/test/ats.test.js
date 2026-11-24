@@ -1,16 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { resumePart } from '../src/ai/parseResume.js';
 import { pdfText, readability, searchTest, jobMatch, hasSkill } from '../src/resume/atsCheck.js';
 
 // A minimal real PDF: each item is [x, y, text] in points on an A4-ish page.
-function makePdf(items) {
+function makePdf(items, link) {
   const stream = items.map(([x, y, t]) => `BT /F1 10 Tf ${x} ${y} Td (${t}) Tj ET`).join('\n');
   const objs = [
     '<< /Type /Catalog /Pages 2 0 R >>',
     '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
-    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+    `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 800] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >>${link ? ' /Annots [6 0 R]' : ''} >>`,
     `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
     '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    ...(link ? [`<< /Type /Annot /Subtype /Link /Rect [50 700 150 720] /A << /S /URI /URI (${link}) >> >>`] : []),
   ];
   let pdf = '%PDF-1.4\n';
   const offsets = objs.map((o, i) => {
@@ -71,4 +73,12 @@ test('job match: score, missing skills and filter risks', () => {
   assert.equal(r.titleFound, true);
   assert.equal(r.score, Math.round(70 * (2 / 3) + 20 * 0.5 + 10));
   assert.deepEqual(r.risks.map((x) => x.level), ['fail', 'warn']); // 2 years short; on-site in Pune
+});
+
+test('a PDF resume with text goes to the AI as text plus its clickable links; a scanned one as the file', async () => {
+  const part = await resumePart({ mimetype: 'application/pdf', buffer: makePdf(lines.map((t, i) => [50, 760 - i * 20, t]), 'https://linkedin.com/in/aarav') });
+  assert.match(part.text, /MERN Stack Developer/);
+  assert.match(part.text, /Links in the resume:\nhttps:\/\/linkedin\.com\/in\/aarav/);
+  const scanned = await resumePart({ mimetype: 'application/pdf', buffer: makePdf([[50, 700, 'Hi']]) });
+  assert.equal(scanned.inlineData.mimeType, 'application/pdf');
 });

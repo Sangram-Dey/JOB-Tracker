@@ -7,7 +7,7 @@ import { Icon } from './ui.jsx';
 
 const MARK = { ok: ['✓', 'text-ok'], warn: ['!', 'text-marigold'], fail: ['✕', 'text-danger'] };
 
-function Findings({ items }) {
+export function Findings({ items }) {
   return (
     <ul className="space-y-1 text-sm">
       {items.map((f) => (
@@ -25,13 +25,13 @@ function Findings({ items }) {
 const errorOf = (m) => m.isError && <p className="text-sm text-danger">{m.error.message}</p>;
 
 export function ResumeCheck() {
-  const check = useMutation({ mutationFn: () => api('/ats/resume', { method: 'POST' }) });
+  const check = useMutation({ meta: { inline: true }, mutationFn: () => api('/ats/resume', { method: 'POST' }) });
   const r = check.data;
   return (
     <section className="panel space-y-4 p-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h2 className="font-display text-lg font-semibold tracking-tight">ATS check</h2>
+          <h2 className="text-lg font-semibold tracking-tight">ATS check</h2>
           <p className="text-sm text-muted">Reads your resume PDF the way an applicant-tracking system does, and checks it for the skills recruiters search.</p>
         </div>
         <button className="btn-outline" onClick={() => check.mutate()} disabled={check.isPending}>
@@ -71,7 +71,7 @@ export function ResumeCheck() {
   );
 }
 
-function Chips({ items, tone }) {
+export function Chips({ items, tone }) {
   return items.map((s) => (
     <span key={s} className={`rounded-md px-1.5 py-0.5 text-xs ${tone}`}>
       {s}
@@ -80,8 +80,8 @@ function Chips({ items, tone }) {
 }
 
 export function JobAtsCheck({ matchId }) {
-  const check = useMutation({ mutationFn: () => api(`/ats/job/${matchId}`, { method: 'POST' }) });
-  const suggest = useMutation({ mutationFn: () => api(`/ats/job/${matchId}/suggest`, { method: 'POST' }) });
+  const check = useMutation({ meta: { inline: true }, mutationFn: () => api(`/ats/job/${matchId}`, { method: 'POST' }) });
+  const suggest = useMutation({ meta: { inline: true }, mutationFn: () => api(`/ats/job/${matchId}/suggest`, { method: 'POST' }) });
   const r = check.data;
   const tone = r && (r.score >= 75 ? 'text-ok' : r.score >= 50 ? 'text-marigold' : 'text-danger');
 
@@ -99,7 +99,7 @@ export function JobAtsCheck({ matchId }) {
       {r && (
         <div className="mt-2 space-y-3 text-sm">
           <p>
-            <span className={`font-display text-2xl font-semibold ${tone}`}>{r.score}%</span> <span className="text-muted">match</span>
+            <span className={`text-2xl font-semibold ${tone}`}>{r.score}%</span> <span className="text-muted">match</span>
             <span className="ml-2 text-xs text-faint">(required skills 70, preferred 20, job title 10)</span>
           </p>
           <div className="flex flex-wrap gap-1">
@@ -140,7 +140,7 @@ export function JobAtsCheck({ matchId }) {
               ))}
             </ol>
           )}
-          {suggest.data && <p className="text-xs text-faint">Copy the edits you agree with into your CV file, then upload it on Profile and check again.</p>}
+          {suggest.data && <p className="text-xs text-faint">Copy the edits you agree with into your CV file, then upload it in Settings and check again.</p>}
         </div>
       )}
     </div>

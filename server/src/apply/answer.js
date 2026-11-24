@@ -23,9 +23,10 @@ export function fromProfile(field, profile) {
   if (/^(full )?name$/.test(l)) return pick(c.name);
   if (/e-?mail/.test(l)) return pick(c.email);
   if (/phone|mobile/.test(l)) return pick(c.phone);
-  if (/linkedin/.test(l)) return pick(link(c.links, /linkedin/i));
-  if (/github/.test(l)) return pick(link(c.links, /github/i));
-  if (/portfolio|website|personal (site|url)/.test(l)) return pick(link(c.links, /^(?!.*(linkedin|github)).*/i));
+  // named fields first; older profiles only have the `links` list
+  if (/linkedin/.test(l)) return pick(c.linkedin || link(c.links, /linkedin/i));
+  if (/github/.test(l)) return pick(c.github || link(c.links, /github/i));
+  if (/portfolio|website|personal (site|url)/.test(l)) return pick(c.portfolio || link(c.links, /^(?!.*(linkedin|github)).*/i));
   if (/current (company|employer)|^company$|^org/.test(l)) return pick(profile?.experience?.[0]?.company);
   if (/current (title|role|position)|job title/.test(l)) return pick(profile?.experience?.[0]?.title);
   if (/(current )?location|city|where are you based/.test(l) && !/relocat|willing|onsite|on-site|office/.test(l)) return pick(c.location);
@@ -59,7 +60,7 @@ export async function aiAnswers(fields, { profile, answers, job }) {
     `<job>${JSON.stringify({ title: job.title, company: job.company, locations: job.locations })}</job>\n` +
     `<profile>${JSON.stringify(profile)}</profile>\n<standard_answers>${JSON.stringify(answers ?? {})}</standard_answers>\n` +
     `<questions>${JSON.stringify(fields.map(({ id, kind, label, required, options }) => ({ id, kind, label, required, options })))}</questions>`;
-  const { answers: out } = await generateJson({ system: SYSTEM, parts: [{ text }], schema: AnswersSchema, what: 'fill the application form' });
+  const { answers: out } = await generateJson({ system: SYSTEM, parts: [{ text }], schema: AnswersSchema, what: 'fill the application form', thinking: 'low' });
   const result = new Map();
   for (const a of out) {
     const f = fields.find((x) => x.id === a.id);

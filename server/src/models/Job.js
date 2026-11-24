@@ -6,7 +6,7 @@ const jobSchema = new mongoose.Schema(
     // sha1 of company + title: the same job from two sources gets the same key, and the
     // unique index makes the second insert a no-op. This is the deduplication.
     dedupeKey: { type: String, required: true, unique: true },
-    source: { type: String, required: true }, // greenhouse | lever | ashby | freehire | remotive | remoteok | himalayas | weworkremotely | jsearch
+    source: { type: String, required: true }, // greenhouse | lever | ashby | freehire | remotive | remoteok | himalayas | weworkremotely | jsearch | apify
     via: String, // the original site when the source is an aggregator, e.g. "naukri", "Indeed"
     externalId: { type: String, required: true }, // the job's id on that source
     title: { type: String, required: true },

@@ -5,7 +5,7 @@ import { JobMatch } from '../models/JobMatch.js';
 import { ScrapeRun } from '../models/ScrapeRun.js';
 import { Profile } from '../models/Profile.js';
 import { PreferencesSchema } from '../schemas/preferences.js';
-import { runScrape, refreshIfStale, isSearching, searchError } from '../jobs/scrape.js';
+import { runScrape, refreshIfStale, isSearching, searchError, nextScheduled } from '../jobs/scrape.js';
 import { findContacts } from '../jobs/contacts.js';
 import { saveFoundContacts } from '../jobs/contactBook.js';
 import { reviewMatch, reviewContext } from '../jobs/review.js';
@@ -55,10 +55,13 @@ const SORTS = {
 // Your feed: your matches joined with the shared job details.
 // GET /api/jobs?status=new|saved|hidden&q=react&workMode=remote&sort=fit|posted|pay|found&page=1
 router.get('/', async (req, res) => {
-  const { status = 'new', q, workMode, sort = 'fit', all, autoApply } = req.query;
+  const { status = 'new', q, workMode, sort = 'fit', all, autoApply, found } = req.query;
   if (!['new', 'saved', 'hidden'].includes(status)) throw httpError(400, 'Unknown status');
   if (!SORTS[sort]) throw httpError(400, 'Unknown sort');
   const page = Math.max(1, Number.parseInt(req.query.page) || 1);
+  // limit: rows per page; "Load more" asks for a bigger page instead of the next one
+  const size = Math.min(500, Math.max(1, Number.parseInt(req.query.limit) || PAGE_SIZE)); // Load more grows it
+  const skip = Math.max(0, Number.parseInt(req.query.skip) || (page - 1) * size);
 
   const jobFilter = {};
   if (workMode) jobFilter['job.workMode'] = workMode;
@@ -73,14 +76,15 @@ router.get('/', async (req, res) => {
   const keep = all === '1' ? { 'job.liveness.status': { $ne: 'closed' }, 'job.junk.0': { $exists: false } } : preferenceFilter(prefs);
 
   const [result] = await JobMatch.aggregate([
-    { $match: { userId: req.userId, status } },
+    // found=today: matches made in the last 24 hours, the same window as "new jobs today" on the Jobs page
+    { $match: { userId: req.userId, status, ...(found === 'today' && { createdAt: { $gt: new Date(Date.now() - 86_400_000) } }) } },
     // $lookup = a join: attach the Job document (without the long description) to each match
     { $lookup: { from: 'jobs', localField: 'jobId', foreignField: '_id', as: 'job', pipeline: [{ $project: { description: 0 } }] } },
     { $unwind: '$job' },
     { $match: jobFilter },
     {
       $facet: {
-        items: [{ $match: keep }, { $sort: SORTS[sort] }, { $skip: (page - 1) * PAGE_SIZE }, { $limit: PAGE_SIZE }],
+        items: [{ $match: keep }, { $sort: SORTS[sort] }, { $skip: skip }, { $limit: size }],
         shown: [{ $match: keep }, { $count: 'n' }],
         closedOrJunk: [{ $match: { $or: [{ 'job.liveness.status': 'closed' }, { 'job.junk.0': { $exists: true } }] } }, { $count: 'n' }],
         all: [{ $count: 'n' }],
@@ -95,7 +99,8 @@ router.get('/', async (req, res) => {
     items: await withApplyStatus(req.userId, result.items),
     page,
     total: shown,
-    hasMore: page * PAGE_SIZE < shown,
+    pageSize: size,
+    hasMore: skip + size < shown,
     closedOrJunk,
     hiddenByPreferences: (result.all[0]?.n ?? 0) - shown - closedOrJunk,
   });
@@ -129,7 +134,7 @@ router.post('/refresh', async (req, res) => {
 // The last search, plus whether one is running now and why the last background one failed (if it did).
 router.get('/runs/latest', async (req, res) => {
   const run = await ScrapeRun.findOne({ userId: req.userId }).sort({ createdAt: -1 });
-  res.json({ run, running: isSearching(req.userId), error: searchError(req.userId) });
+  res.json({ run, running: isSearching(req.userId), error: searchError(req.userId), nextScheduled: await nextScheduled(req.userId) });
 });
 
 // One of your matches, with the full job (description included).

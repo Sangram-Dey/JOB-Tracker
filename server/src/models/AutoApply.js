@@ -37,12 +37,17 @@ const autoApplySchema = new mongoose.Schema(
     screenshot: { type: Buffer, select: false }, // the filled form, before submitting
     confirmation: { type: Buffer, select: false }, // the company's "thank you" page
     error: String,
+    step: String, // while preparing or submitting: what it is doing now (shown with a timer)
+    stepAt: Date,
     appliedAt: Date,
+    resumePdfId: mongoose.Schema.Types.ObjectId, // the tailored resume sent (resume/tailorJob.js); none = your own PDF
+    useOriginal: { type: Boolean, default: false }, // you chose your own PDF over the tailored one
     history: [{ _id: false, status: String, at: Date }],
   },
   { timestamps: true },
 );
 autoApplySchema.index({ userId: 1, jobId: 1 }, { unique: true });
+autoApplySchema.index({ userId: 1, status: 1, updatedAt: -1 }); // review queue and today's count
 autoApplySchema.pre('save', function () {
   if (this.isNew || this.isModified('status')) this.history.push({ status: this.status, at: new Date() });
 });

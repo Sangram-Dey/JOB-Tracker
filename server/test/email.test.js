@@ -34,7 +34,7 @@ test('active jobs: open, not junk, posted in the last 30 days', () => {
   assert.equal(isActive({ junk: ['spam'] }, now), false);
 });
 
-test('daily pick: best fit first, one per company, skips unsendable, waiting, recent and job-less contacts', () => {
+test('daily pick: best fit first, one per company, skips unsendable, waiting, recent, emailed-before and job-less contacts', () => {
   const job = [{ fit: 80 }];
   const rows = [
     { company: 'Acme', email: 'a@acme.com', sendable: true, jobs: job },
@@ -46,6 +46,7 @@ test('daily pick: best fit first, one per company, skips unsendable, waiting, re
     { company: 'Echo', email: 'e@echo.com', sendable: true, jobs: job, recent: true },
     { company: 'Fox', email: 'f@fox.com', sendable: true, jobs: job },
     { company: 'Golf', email: 'g@golf.com', sendable: true, jobs: job },
+    { company: 'Hotel', email: 'h@hotel.com', sendable: true, jobs: job, lastContactedAt: new Date('2026-10-01') }, // emailed before: never picked automatically
   ];
   assert.deepEqual(pickDaily(rows, 10).map((r) => r.email), ['a@acme.com', 'f@fox.com', 'g@golf.com']);
   assert.deepEqual(pickDaily(rows, 2).map((r) => r.email), ['a@acme.com', 'f@fox.com']);

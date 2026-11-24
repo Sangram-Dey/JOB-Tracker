@@ -1,7 +1,6 @@
 import { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api.js';
-import { ApplyAnswers } from '../components/AutoApply.jsx';
 import { PageHeader, TagInput } from '../components/ui.jsx';
 
 const MODES = [
@@ -12,7 +11,8 @@ const MODES = [
 
 const SITES = [
   ['freehire', 'freehire', 'Naukri, Shine, Hirist, Instahyre, Cutshort, Arc and more. Best for India.'],
-  ['jsearch', 'JSearch', 'Indeed, Glassdoor and Foundit through Google Jobs. Needs JSEARCH_API_KEY on the server.'],
+  ['jsearch', 'JSearch', 'Indeed, Glassdoor and Foundit through Google Jobs.'],
+  ['apify', 'Apify (Naukri + Indeed)', 'Public listings scraped on Apify, once a day; never uses your own login.'],
   ['remotive', 'Remotive', 'Remote jobs only. Checked at most once an hour.'],
   ['remoteok', 'Remote OK', 'Remote jobs only.'],
   ['himalayas', 'Himalayas', 'Remote jobs only.'],
@@ -33,14 +33,6 @@ export default function PreferencesPage() {
         // key: start a fresh draft whenever saved data changes
         <PreferencesForm key={prefs.dataUpdatedAt} initial={prefs.data} onSaved={(saved) => queryClient.setQueryData(['preferences'], saved)} />
       )}
-      {/* separate from the form above: it has its own Save */}
-      <section className="mt-10 grid gap-x-10 gap-y-4 border-t border-line py-8 md:grid-cols-[240px_1fr]">
-        <div>
-          <h2 className="font-display text-lg font-semibold tracking-tight">Auto-apply answers</h2>
-          <p className="mt-1 help">What application forms ask that a resume doesn't say. Fill once.</p>
-        </div>
-        <ApplyAnswers />
-      </section>
     </div>
   );
 }
@@ -50,7 +42,7 @@ function Section({ title, help, children }) {
   return (
     <section className="grid gap-x-10 gap-y-4 border-t border-line py-8 first:border-t-0 first:pt-2 md:grid-cols-[240px_1fr]">
       <div>
-        <h2 className="font-display text-lg font-semibold tracking-tight">{title}</h2>
+        <h2 className="text-lg font-semibold tracking-tight">{title}</h2>
         <p className="mt-1 help">{help}</p>
       </div>
       <div className="min-w-0 space-y-5">{children}</div>
@@ -105,7 +97,7 @@ function PlatformPicker({ value, onChange }) {
         {all.map(({ platform, count }) => (
           <label
             key={platform}
-            className="cursor-pointer rounded-lg border border-line px-3 py-1.5 text-sm text-muted select-none has-[:checked]:border-ink has-[:checked]:bg-ink has-[:checked]:text-surface has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-cobalt"
+            className="cursor-pointer rounded-lg border border-line px-3 py-1.5 text-sm text-muted select-none has-[:checked]:border-cobalt has-[:checked]:bg-cobalt has-[:checked]:text-on-accent has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-cobalt"
           >
             <input type="checkbox" className="sr-only" checked={value.includes(platform)} onChange={() => toggle(platform)} />
             {platformName(platform)} <span className="opacity-60">{count}</span>
@@ -121,7 +113,7 @@ function PreferencesForm({ initial, onSaved }) {
   const [p, setP] = useState(initial);
   const set = (key) => (value) => setP({ ...p, [key]: value });
   const setBoards = (source) => (value) => setP({ ...p, companies: { ...p.companies, [source]: value } });
-  const save = useMutation({ mutationFn: () => api('/preferences', { method: 'PUT', body: p }), onSuccess: onSaved });
+  const save = useMutation({ meta: { inline: true, success: 'Preferences saved. New searches use them.' }, mutationFn: () => api('/preferences', { method: 'PUT', body: p }), onSuccess: onSaved });
   const toggleMode = (mode) => set('workModes')(p.workModes.includes(mode) ? p.workModes.filter((m) => m !== mode) : [...p.workModes, mode]);
   const dirty = p !== initial;
 
@@ -149,7 +141,7 @@ function PreferencesForm({ initial, onSaved }) {
               {MODES.map(([mode, label]) => (
                 <label
                   key={mode}
-                  className="cursor-pointer rounded-lg border border-line px-4 py-2 text-sm text-muted select-none has-[:checked]:border-ink has-[:checked]:bg-ink has-[:checked]:text-surface has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-cobalt"
+                  className="cursor-pointer rounded-lg border border-line px-4 py-2 text-sm text-muted select-none has-[:checked]:border-cobalt has-[:checked]:bg-cobalt has-[:checked]:text-on-accent has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-cobalt"
                 >
                   <input type="checkbox" className="sr-only" checked={p.workModes.includes(mode)} onChange={() => toggleMode(mode)} />
                   {label}
@@ -232,11 +224,27 @@ function PreferencesForm({ initial, onSaved }) {
                     onChange={(e) => set('sources')({ ...p.sources, [key]: e.target.checked })}
                   />
                   {/* a switch drawn from the checkbox's state */}
-                  <span className="relative h-5 w-9 shrink-0 rounded-full bg-line transition-colors peer-checked:bg-ink peer-focus-visible:outline-2 peer-focus-visible:outline-cobalt after:absolute after:top-0.5 after:left-0.5 after:size-4 after:rounded-full after:bg-surface after:transition-transform peer-checked:after:translate-x-4" />
+                  <span className="relative h-5 w-9 shrink-0 rounded-full bg-line transition-colors peer-checked:bg-cobalt peer-focus-visible:outline-2 peer-focus-visible:outline-cobalt after:absolute after:top-0.5 after:left-0.5 after:size-4 after:rounded-full after:bg-surface after:transition-transform peer-checked:after:translate-x-4" />
                 </label>
               </li>
             ))}
           </ul>
+        </Section>
+
+        <Section title="Morning summary" help="Each morning after 8, a short email to your own Gmail: replies, emails and applications ready for you, new jobs.">
+          <label className="flex cursor-pointer items-center justify-between gap-4 rounded-xl border border-line px-4 py-3">
+            <span className="text-sm font-medium">Email me a daily summary</span>
+            <input type="checkbox" className="peer sr-only" checked={p.dailySummaryEmail} onChange={(e) => set('dailySummaryEmail')(e.target.checked)} />
+            <span className="relative h-5 w-9 shrink-0 rounded-full bg-line transition-colors peer-checked:bg-cobalt peer-focus-visible:outline-2 peer-focus-visible:outline-cobalt after:absolute after:top-0.5 after:left-0.5 after:size-4 after:rounded-full after:bg-surface after:transition-transform peer-checked:after:translate-x-4" />
+          </label>
+        </Section>
+
+        <Section title="Tailored resume" help="Every HR email and auto-application gets a copy of your resume tuned to that job's description, using only facts from your history. You see every change, can remodify it, or send your own PDF instead.">
+          <label className="flex cursor-pointer items-center justify-between gap-4 rounded-xl border border-line px-4 py-3">
+            <span className="text-sm font-medium">Tailor my resume for every application</span>
+            <input type="checkbox" className="peer sr-only" checked={p.tailorResume} onChange={(e) => set('tailorResume')(e.target.checked)} />
+            <span className="relative h-5 w-9 shrink-0 rounded-full bg-line transition-colors peer-checked:bg-cobalt peer-focus-visible:outline-2 peer-focus-visible:outline-cobalt after:absolute after:top-0.5 after:left-0.5 after:size-4 after:rounded-full after:bg-surface after:transition-transform peer-checked:after:translate-x-4" />
+          </label>
         </Section>
 
         <Section

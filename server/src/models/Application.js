@@ -21,6 +21,8 @@ const applicationSchema = new mongoose.Schema(
     status: { type: String, enum: STATUSES, default: 'draft' },
     warnings: [String], // numbers or placeholders not found in your history: check before approving
     sentAt: Date,
+    useOriginal: { type: Boolean, default: false }, // you chose your own PDF over the one tailored to this job
+    resumePdfId: mongoose.Schema.Types.ObjectId, // the tailored resume that was attached (resume/tailorJob.js); none = your own
     messageId: String, // Gmail's id for the sent email
     error: String,
     history: [{ _id: false, status: String, at: Date }],
@@ -28,6 +30,7 @@ const applicationSchema = new mongoose.Schema(
   { timestamps: true },
 );
 applicationSchema.index({ userId: 1, to: 1, sentAt: -1 });
+applicationSchema.index({ userId: 1, status: 1, sentAt: -1 }); // daily limit, queue, Ready to send
 
 // Every status change is recorded, so the Tracker can show a timeline.
 applicationSchema.pre('save', function () {

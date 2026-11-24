@@ -8,6 +8,7 @@ import { draftEmail } from '../ai/draftEmail.js';
 import { factIssues } from '../resume/factCheck.js';
 import { httpError } from '../utils/httpError.js';
 import { REPEAT_DAYS } from './queue.js';
+import { startTailoring, tailoringOn } from '../resume/tailorJob.js';
 
 // The HR table (your contacts with their companies' active jobs) and the emails prepared from it.
 // Emails are written in the background (Gemini takes a few seconds each) and land in "Ready to send".
@@ -94,8 +95,8 @@ const why = (row) =>
 
 async function assertCanWrite(userId) {
   const profile = await Profile.findOne({ userId }, 'data resumePdf');
-  if (!profile?.data) throw httpError(400, 'Upload your resume on the Profile page first');
-  if (!profile.resumePdf?.id) throw httpError(400, 'Upload the resume PDF to attach on the Profile page first');
+  if (!profile?.data) throw httpError(400, 'Upload your resume in Settings first');
+  if (!profile.resumePdf?.id) throw httpError(400, 'Upload the resume PDF to attach in Settings first');
 }
 
 // One writer per user; the last result is kept so the page can say what was skipped.
@@ -117,7 +118,7 @@ function startWriting(userId, rows) {
 }
 
 async function writeEmails(userId, rows, ids) {
-  const profile = await Profile.findOne({ userId }, 'data');
+  const profile = await Profile.findOne({ userId }, 'data preferences');
   let created = 0;
   const skipped = [];
   for (const row of rows) {
@@ -138,6 +139,8 @@ async function writeEmails(userId, rows, ids) {
         warnings: warningsFor(subject, body, [profile.data]),
       });
       created++;
+      // the resume for this job, tailored in the background while you read the email
+      if (job && tailoringOn(profile)) startTailoring(userId, job._id).catch((err) => console.error('Tailoring:', err.message));
     } catch (err) {
       skipped.push({ contact: row.email, reason: err.message });
       if (err.status === 429) break; // free-tier limit: the rest would fail too
@@ -149,13 +152,15 @@ async function writeEmails(userId, rows, ids) {
 }
 
 // "Move to Ready": the contacts you ticked in the HR table.
-export async function prepareSelected(userId, contactIds) {
+// confirmRepeat: you confirmed writing again to people you emailed before; without it they're skipped.
+export async function prepareSelected(userId, contactIds, { confirmRepeat = false } = {}) {
   await assertCanWrite(userId);
   const { rows } = await hrTable(userId);
   const ids = new Set(contactIds.map(String));
   const chosen = rows.filter((r) => ids.has(String(r._id)));
-  const skipped = chosen.filter(why).map((r) => ({ contact: r.email || r.phone, reason: why(r) }));
-  const ok = chosen.filter((r) => !why(r));
+  const reason = (r) => why(r) ?? (r.lastContactedAt && !confirmRepeat ? 'Emailed before: confirm to email again' : null);
+  const skipped = chosen.filter(reason).map((r) => ({ contact: r.email || r.phone, reason: reason(r) }));
+  const ok = chosen.filter((r) => !reason(r));
   if (ok.length) startWriting(userId, ok);
   return { writing: ok.length, skipped };
 }
@@ -168,7 +173,8 @@ export function pickDaily(rows, count) {
   for (const r of rows) {
     if (picked.length >= count) break;
     const key = companyKey(r.company);
-    if (why(r) || !r.jobs.length || busy.has(key)) continue;
+    // never someone emailed before: a second email only goes out when you choose it and confirm
+    if (why(r) || r.lastContactedAt || !r.jobs.length || busy.has(key)) continue;
     busy.add(key);
     picked.push(r);
   }

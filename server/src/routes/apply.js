@@ -5,6 +5,8 @@ import { Profile } from '../models/Profile.js';
 import { AutoApply } from '../models/AutoApply.js';
 import { ApplyAnswersSchema } from '../schemas/applyAnswers.js';
 import { queuePrepare, queueSubmit, openNow, DAILY_APPLY_LIMIT } from '../apply/run.js';
+import { readPdf } from '../resume/storage.js';
+import { syncTracked } from '../tracker/track.js';
 import { requireAuth } from '../middleware/requireAuth.js';
 import { httpError } from '../utils/httpError.js';
 
@@ -34,14 +36,18 @@ router.get('/queue', async (req, res) => {
     { $project: { n: { $size: { $filter: { input: '$fields', cond: { $and: ['$$this.needsYou', { $in: ['$$this.value', [null, '']] }] } } } } } },
   ]);
   const needsBy = new Map(needs.map((x) => [String(x._id), x.n]));
-  const today = await AutoApply.countDocuments({ userId: req.userId, status: { $in: ['submitting', 'opened', 'applied'] }, updatedAt: { $gt: new Date(Date.now() - 86_400_000) } });
-  res.json({ items: items.map((i) => ({ ...i.toJSON(), needsYou: needsBy.get(String(i._id)) ?? 0 })), today, dailyLimit: DAILY_APPLY_LIMIT });
+  const counted = { userId: req.userId, status: { $in: ['submitting', 'opened', 'applied'] }, updatedAt: { $gt: new Date(Date.now() - 86_400_000) } };
+  const today = await AutoApply.countDocuments(counted);
+  // At the limit: the oldest application in the window drops out 24 h after it was sent, freeing one slot.
+  const oldest = today >= DAILY_APPLY_LIMIT && (await AutoApply.findOne(counted, 'updatedAt').sort({ updatedAt: 1 }));
+  const freesAt = oldest ? new Date(oldest.updatedAt.getTime() + 86_400_000) : null;
+  res.json({ items: items.map((i) => ({ ...i.toJSON(), needsYou: needsBy.get(String(i._id)) ?? 0 })), today, dailyLimit: DAILY_APPLY_LIMIT, freesAt });
 });
 
 router.post('/prepare', async (req, res) => {
   const { matchIds } = z.object({ matchIds: z.array(objectId).min(1).max(20) }).parse(req.body);
   const profile = await Profile.findOne({ userId: req.userId }, 'data resumePdf');
-  if (!profile?.data || !profile.resumePdf?.id) throw httpError(400, 'Upload your resume (and the resume PDF) on the Profile page first');
+  if (!profile?.data || !profile.resumePdf?.id) throw httpError(400, 'Upload your resume (and the resume PDF) in Settings first');
   res.status(202).json(await queuePrepare(req.userId, matchIds));
 });
 
@@ -66,6 +72,23 @@ router.get('/:id/screenshot', async (req, res) => {
   const image = req.query.confirmation ? app.confirmation : app.screenshot;
   if (!image) throw httpError(404, 'No screenshot yet');
   res.type('image/jpeg').send(image);
+});
+
+// The tailored resume this application used (the Tracker's "Resume they got").
+router.get('/:id/resume', async (req, res) => {
+  const app = await mine(req);
+  if (!app.resumePdfId) throw httpError(404, 'This application used your main resume PDF');
+  res.type('application/pdf').set('Content-Disposition', 'inline; filename="tailored-resume.pdf"').send(await readPdf(app.resumePdfId));
+});
+
+// Send your own PDF instead of the tailored one, or switch back.
+router.put('/:id/resume', async (req, res) => {
+  const { useOriginal } = z.object({ useOriginal: z.boolean() }).parse(req.body);
+  const app = await mine(req);
+  if (['applied', 'submitting', 'preparing'].includes(app.status)) throw httpError(409, 'This application is busy or done');
+  app.useOriginal = useOriginal;
+  await app.save();
+  res.json({ useOriginal });
 });
 
 // Your corrections: any field's value. A corrected field no longer needs you.
@@ -97,6 +120,7 @@ router.post('/:id/applied', async (req, res) => {
   const app = await mine(req);
   Object.assign(app, { status: 'applied', appliedAt: app.appliedAt ?? new Date(), error: undefined });
   await app.save();
+  await syncTracked(req.userId);
   res.json(app);
 });
 

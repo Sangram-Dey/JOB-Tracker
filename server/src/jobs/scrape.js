@@ -14,40 +14,72 @@ import * as lever from '../sources/lever.js';
 import * as ashby from '../sources/ashby.js';
 import * as freehire from '../sources/freehire.js';
 import * as jsearch from '../sources/jsearch.js';
+import * as apify from '../sources/apify.js';
 import { remotive, remoteok, himalayas, weworkremotely } from '../sources/remoteFeeds.js';
 
 // Two kinds of source:
 //   boards: one company's job board (you list the board names)
 //   search: a job site searched with your role words and places
 const BOARDS = { greenhouse, lever, ashby };
-const SEARCH = { freehire, remotive, remoteok, himalayas, weworkremotely, jsearch };
-const JSEARCH_MONTHLY_LIMIT = Number(process.env.JSEARCH_MONTHLY_LIMIT) || 150; // free tier is about 200
+const SEARCH = { freehire, remotive, remoteok, himalayas, weworkremotely, jsearch, apify };
 const LIVENESS_PER_RUN = 40;
-const MANUAL_COOLDOWN = 60_000; // be polite to free APIs: at most one manual search per minute
+const MANUAL_COOLDOWN = 60_000; // at most one Refresh click per minute
 const running = new Set(); // userIds with a run in progress (one server process, so memory is enough)
 
 
-// Every API call this run will make, as { source, label, run }.
-async function planTasks(userId, prefs, terms) {
-  const tasks = Object.entries(prefs.companies).flatMap(([source, boards]) =>
-    boards.map((board) => ({ source, label: board, run: () => BOARDS[source].fetchBoard(board) })),
-  );
-  if (!terms.length) return tasks;
-  // JSearch's free quota is monthly: count its calls in the last 30 days (runs are kept for 30 days).
-  const [used] = await ScrapeRun.aggregate([
-    { $match: { userId } },
+// Who may start which sources:
+//   free sources (no monthly budget): page load, the Refresh button and the 6-hour schedule; each at most once an hour
+//   paid sources (JSearch, Apify: a monthly budget on a key shared by every user): only the 6-hour schedule
+const HOUR = 3600_000;
+const DAY = 24 * HOUR;
+export const isPaid = (mod) => Boolean(mod.monthlyLimit);
+
+// When this source (and board) was last called for this user, or null.
+async function lastCall(userId, source, board) {
+  const run = await ScrapeRun.findOne({ userId, boards: { $elemMatch: board ? { source, board } : { source } } }, 'createdAt').sort({ createdAt: -1 });
+  return run?.createdAt ?? null;
+}
+
+// A fair part of a shared monthly budget: what's left overall, and at most an equal share per active user.
+// usage: Map userId -> calls in the last 30 days.
+export function fairShare(limit, usage, userId) {
+  const users = new Set([...usage.keys(), userId]).size;
+  const used = [...usage.values()].reduce((a, b) => a + b, 0);
+  return Math.max(0, Math.min(limit - used, Math.floor(limit / users) - (usage.get(userId) ?? 0)));
+}
+async function paidCallsLeft(userId, source, limit) {
+  const rows = await ScrapeRun.aggregate([
+    { $match: { createdAt: { $gt: new Date(Date.now() - 30 * DAY) } } },
     { $unwind: '$boards' },
-    { $match: { 'boards.source': 'jsearch' } },
-    { $count: 'n' },
+    { $match: { 'boards.source': source } },
+    { $group: { _id: '$userId', n: { $sum: 1 } } },
   ]);
-  const ctx = { callsLeft: JSEARCH_MONTHLY_LIMIT - (used?.n ?? 0) };
-  for (const [source, mod] of Object.entries(SEARCH)) {
-    if (!prefs.sources[source]) continue;
-    // Some sources ask for few calls (Remotive: a few a day), so they keep their own minimum gap between calls.
-    if (mod.minGapMs && (await ScrapeRun.exists({ userId, 'boards.source': source, createdAt: { $gt: Date.now() - mod.minGapMs } }))) continue;
-    tasks.push(...mod.plan(prefs, terms, ctx).map((t) => ({ source, ...t })));
+  return fairShare(limit, new Map(rows.map((r) => [r._id, r.n])), userId);
+}
+
+// Every API call this run will make, as { source, label, run }, and the sources skipped with why and until when.
+async function planTasks(userId, prefs, terms, { paid }) {
+  const tasks = [];
+  const skipped = [];
+  const waiting = async (source, board, gap) => {
+    const last = await lastCall(userId, source, board);
+    if (last && Date.now() - last < gap) return skipped.push({ source, board, until: new Date(last.getTime() + gap), reason: 'checked recently' });
+  };
+  for (const [source, boards] of Object.entries(prefs.companies)) {
+    for (const board of boards) if (!(await waiting(source, board, HOUR))) tasks.push({ source, label: board, run: () => BOARDS[source].fetchBoard(board) });
   }
-  return tasks;
+  if (!terms.length) return { tasks, skipped };
+  for (const [source, mod] of Object.entries(SEARCH)) {
+    if (!prefs.sources[source] || (isPaid(mod) && !paid)) continue; // paid: the 6-hour schedule only
+    if (await waiting(source, null, mod.minGapMs ?? HOUR)) continue;
+    const callsLeft = isPaid(mod) ? await paidCallsLeft(userId, source, mod.monthlyLimit) : Infinity;
+    if (callsLeft <= 0) {
+      skipped.push({ source, reason: 'monthly budget used' });
+      continue;
+    }
+    tasks.push(...mod.plan(prefs, terms, { callsLeft }).map((t) => ({ source, ...t })));
+  }
+  return { tasks, skipped };
 }
 
 // Role words from your resume, for when Preferences has none: your latest job title, your headline's first part
@@ -66,7 +98,7 @@ export function termsFromProfile(data) {
 
 export const isSearching = (userId) => running.has(userId);
 
-// Opening the Jobs tab: search in the background if the last search is over an hour old (never two at once).
+// Opening (or reloading) the Jobs tab: a free-sources search in the background if the last search is over an hour old.
 const STALE_MS = 3600_000;
 const lastError = new Map(); // userId -> why the last background search failed
 export async function refreshIfStale(userId) {
@@ -85,7 +117,7 @@ export async function runScrape(userId, trigger) {
   running.add(userId);
   try {
     const profile = await Profile.findOne({ userId });
-    if (!profile?.preferences && !profile?.data) throw httpError(400, 'Upload your resume on the Profile page, or save your preferences');
+    if (!profile?.preferences && !profile?.data) throw httpError(400, 'Upload your resume in Settings, or save your preferences');
     const prefs = PreferencesSchema.parse(profile.preferences ?? {}); // fills defaults for newer fields
     if (trigger === 'manual') {
       const last = await ScrapeRun.findOne({ userId }).sort({ createdAt: -1 });
@@ -101,7 +133,14 @@ export async function runScrape(userId, trigger) {
     if (!terms.length && !Object.values(prefs.companies).flat().length) {
       throw httpError(400, 'Add role keywords in Preferences (e.g. mern, full stack, node, react) to search job sites');
     }
-    const tasks = await planTasks(userId, prefs, terms);
+    const { tasks, skipped } = await planTasks(userId, prefs, terms, { paid: trigger === 'schedule' });
+    run.skipped = skipped;
+    if (!tasks.length) {
+      // every free source was checked within the hour: nothing to call, so no empty run is saved
+      if (trigger !== 'manual') return null;
+      const next = Math.min(...skipped.map((s) => s.until?.getTime() ?? Infinity));
+      throw httpError(429, `Every free job board was checked in the last hour${Number.isFinite(next) ? `; next check after ${new Date(next).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' })}` : ''}. Your saved jobs are up to date.`);
+    }
     if (!terms.length) run.boards.push({ source: 'job sites', board: 'skipped', fetched: 0, kept: 0, error: 'Add role keywords in Preferences to search job sites' });
 
     // All sources at once; one failing source must not stop the others, so each result is settled separately.
@@ -176,11 +215,17 @@ export async function runScrape(userId, trigger) {
 // Checking "last run" instead of a plain 6-hour timer means restarts and a sleeping laptop don't skip searches.
 // shortcut: in-process timer, fine for one server; move to Agenda/BullMQ when there are several servers or many users.
 const SIX_HOURS = 6 * 3600 * 1000;
+// When the next scheduled search (the one with Naukri, Indeed and JSearch) is due; null = within the next half hour.
+export async function nextScheduled(userId) {
+  const last = await ScrapeRun.findOne({ userId, trigger: 'schedule' }, 'createdAt').sort({ createdAt: -1 });
+  return last ? new Date(Math.max(Date.now(), last.createdAt.getTime() + SIX_HOURS)) : null;
+}
 export function startSchedule() {
   const tick = async () => {
     const profiles = await Profile.find({ $or: [{ preferences: { $exists: true } }, { data: { $exists: true } }] }, 'userId');
     for (const { userId } of profiles) {
-      const last = await ScrapeRun.findOne({ userId }).sort({ createdAt: -1 });
+      // the last *scheduled* run: Refresh clicks (free sources only) must not push the paid sources back
+      const last = await ScrapeRun.findOne({ userId, trigger: 'schedule' }, 'createdAt').sort({ createdAt: -1 });
       if (last && Date.now() - last.createdAt < SIX_HOURS) continue;
       // 400 = setup missing (no keywords yet): nothing to search, so stay quiet instead of logging every 30 minutes.
       await runScrape(userId, 'schedule').catch((err) => err.status === 400 || console.error(`Scheduled search for ${userId} failed:`, err.message));

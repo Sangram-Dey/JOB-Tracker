@@ -16,16 +16,16 @@ const restingUntil = new Map(); // model -> time it can be tried again
 
 let gemini; // created on first use, so tests and startup don't need a key
 // Timeout so a stuck request fails with an error instead of hanging forever.
-const client = () => (gemini ??= new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY, httpOptions: { timeout: 120_000 } }));
+const client = () => (gemini ??= new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY, httpOptions: { timeout: 45_000 } }));
 
 const isDaily = (err) => err.status === 429 && /PerDay/i.test(err.message ?? '');
 // Google says when the quota frees up ("retryDelay":"69943s"); default to an hour.
 const retryAfterMs = (err) => Number(String(err.message).match(/"retryDelay":"(\d+)s"/)?.[1] ?? 3600) * 1000;
 
-// One model, with a short retry for a busy moment. 504 = Google's deadline ran out while it was thinking:
-// the retry thinks less so it finishes.
-async function ask(model, request) {
-  let fast = false;
+// One model. A short retry only on the last model left: otherwise the next model answers sooner.
+// 504 = Google's deadline ran out while it was thinking: the retry thinks less so it finishes.
+async function ask(model, request, { thinking, lastChance }) {
+  let fast = thinking === 'low';
   for (let attempt = 1; ; attempt++) {
     try {
       return await client().models.generateContent({
@@ -34,7 +34,7 @@ async function ask(model, request) {
         config: { ...request.config, ...(fast && { thinkingConfig: { thinkingLevel: 'low' } }) },
       });
     } catch (err) {
-      if (![500, 503, 504].includes(err.status) || attempt >= 2) throw err;
+      if (!lastChance || ![500, 503, 504].includes(err.status) || attempt >= 2) throw err;
       if (err.status === 504) fast = true;
       await new Promise((r) => setTimeout(r, 3000));
     }
@@ -43,19 +43,24 @@ async function ask(model, request) {
 
 // One structured-output call: Gemini must answer JSON in the Zod schema's shape, and the answer is validated
 // again here, because model output is untrusted until checked.
-export async function generateJson({ system, parts, schema, what }) {
+// thinking: 'low' for copy/sort jobs (reading a resume, sorting a reply): much faster, no quality loss there.
+export async function generateJson({ system, parts, schema, what, thinking }) {
   const { $schema, ...jsonSchema } = z.toJSONSchema(schema);
   const request = { contents: [{ role: 'user', parts }], config: { systemInstruction: system, responseMimeType: 'application/json', responseJsonSchema: jsonSchema } };
   let response;
   let lastErr;
-  for (const model of MODELS) {
-    if ((restingUntil.get(model) ?? 0) > Date.now()) continue;
+  const ready = MODELS.filter((m) => (restingUntil.get(m) ?? 0) <= Date.now());
+  for (const model of ready) {
+    const started = Date.now();
     try {
-      response = await ask(model, request);
+      response = await ask(model, request, { thinking, lastChance: model === ready.at(-1) });
       lastModel = model;
+      const u = response.usageMetadata ?? {};
+      console.log(`Gemini ${what}: ${model}, ${((Date.now() - started) / 1000).toFixed(1)} s, ${u.promptTokenCount ?? '?'} in / ${u.candidatesTokenCount ?? '?'} out / ${u.thoughtsTokenCount ?? 0} thinking tokens`);
       break;
     } catch (err) {
       lastErr = err;
+      console.log(`Gemini ${what}: ${model} failed after ${((Date.now() - started) / 1000).toFixed(1)} s (${err.status ?? err.message})`);
       if (isDaily(err)) restingUntil.set(model, Date.now() + retryAfterMs(err));
       else if (err.status === 404) restingUntil.set(model, Date.now() + 7 * 86_400_000); // retired for new users
       // used up, retired, rate-limited this minute, or busy: the next model may answer; anything else is our bug
@@ -71,7 +76,8 @@ export async function generateJson({ system, parts, schema, what }) {
       : err.status === 503 ? 'Gemini is busy right now, try again in a minute'
       : err.status === 504 ? 'Gemini took too long to answer, try again'
       : 'Gemini request failed';
-    throw Object.assign(httpError(err.status === 429 || allDaily ? 429 : 502, msg), { cause: lastErr });
+    // busy: overloaded or rate-limited this minute (not the daily limit), so trying again shortly usually works
+    throw Object.assign(httpError(err.status === 429 || allDaily ? 429 : 502, msg), { cause: lastErr, busy: !allDaily && [429, 500, 503, 504].includes(err.status) });
   }
   let json;
   try {
@@ -85,4 +91,16 @@ export async function generateJson({ system, parts, schema, what }) {
     throw httpError(502, `Gemini could not ${what} (finish reason: ${response.candidates?.[0]?.finishReason})`);
   }
   return result.data;
+}
+
+// Runs a Gemini call; if every model was busy, waits (onBusy says so, e.g. to show "retrying") and tries once more.
+export async function withBusyRetry(fn, { onBusy, waitMs = 30_000 } = {}) {
+  try {
+    return await fn();
+  } catch (err) {
+    if (!err.busy) throw err;
+    await onBusy?.();
+    await new Promise((r) => setTimeout(r, waitMs));
+    return fn();
+  }
 }

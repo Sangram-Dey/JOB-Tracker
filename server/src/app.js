@@ -11,6 +11,9 @@ import contactsRoutes from './routes/contacts.js';
 import outreachRoutes from './routes/outreach.js';
 import atsRoutes from './routes/ats.js';
 import applyRoutes from './routes/apply.js';
+import trackerRoutes from './routes/tracker.js';
+import resumeRoutes from './routes/resume.js';
+import tailorRoutes from './routes/tailor.js';
 
 // The Express app lives here, separate from index.js (which connects to Mongo and listens),
 // so tests can start the app without a database.
@@ -30,7 +33,10 @@ app.use('/api/jobs', jobsRoutes);
 app.use('/api/contacts', contactsRoutes);
 app.use('/api/outreach', outreachRoutes);
 app.use('/api/ats', atsRoutes);
+app.use('/api/resume', resumeRoutes);
+app.use('/api/tailor', tailorRoutes);
 app.use('/api/apply', applyRoutes);
+app.use('/api/tracker', trackerRoutes);
 
 // In production, Express also serves the built React app (client/dist): one server, one domain, no CORS.
 const clientDist = fileURLToPath(new URL('../../client/dist', import.meta.url));

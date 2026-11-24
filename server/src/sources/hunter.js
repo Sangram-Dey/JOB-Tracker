@@ -11,7 +11,9 @@ const MONTHLY_LIMIT = Number(process.env.HUNTER_MONTHLY_LIMIT) || 25;
 const CACHE_DAYS = 30;
 
 // A log of lookups: the cache and the budget.
-const Lookup = mongoose.models.Lookup ?? mongoose.model('Lookup', new mongoose.Schema({ userId: String, domain: String, resolved: String, found: Number }, { timestamps: true }));
+const lookupSchema = new mongoose.Schema({ userId: String, domain: String, resolved: String, found: Number }, { timestamps: true });
+lookupSchema.index({ createdAt: 1 }, { expireAfterSeconds: 31 * 86_400 }); // both the cache and the budget look back 30 days
+const Lookup = mongoose.models.Lookup ?? mongoose.model('Lookup', lookupSchema);
 
 export async function hunterStatus(userId) {
   const used = await Lookup.countDocuments({ userId, createdAt: { $gt: new Date(Date.now() - 30 * 86_400_000) } });
