@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api.js';
-import { Icon, PageHeader, timeAgo } from '../components/ui.jsx';
+import { Guide, Icon, Notice, PAGE_SIZE, PageHeader, Pager, Quota, timeAgo, toast, untilText, Collapsible, Toggle } from '../components/ui.jsx';
 import { JobAtsCheck } from '../components/AtsCheck.jsx';
+import { TailorCard } from '../components/TailorCard.jsx';
 import { ApplyQueue, APPLY_STATUS } from '../components/AutoApply.jsx';
 
 const MODE_LABEL = { remote: 'Remote', hybrid: 'Hybrid', onsite: 'On-site', unknown: 'Mode not given' };
@@ -12,17 +13,31 @@ const SOURCE_LABEL = {
   ashby: 'Ashby',
   freehire: 'freehire',
   jsearch: 'JSearch',
+  apify: 'Apify',
   remotive: 'Remotive',
   remoteok: 'Remote OK',
   himalayas: 'Himalayas',
   weworkremotely: 'We Work Remotely',
 };
+const PLATFORM = { naukri: 'Naukri', indeed: 'Indeed', linkedin: 'LinkedIn' };
+const MOVED = { saved: 'saved', hidden: 'hidden', new: 'moved back to New' };
 const TABS = [
   ['new', 'New'],
   ['saved', 'Saved'],
   ['hidden', 'Hidden'],
 ];
 const FRESH_MS = 86_400_000;
+const MAX_PICK = 50; // jobs ticked at once, for any bulk action
+const MAX_PREPARE = 20; // auto-apply forms prepared in one go (the server's limit)
+const STEPS = [
+  ['Find jobs that fit', 'New matches arrive on their own. Sort by Best fit and open a job to read why it fits.'],
+  ['Tick the jobs you want', 'Every job has a checkbox. Tick several, or "Select all shown" (up to 50).'],
+  ['Auto-apply where it can', 'Auto-apply fills Greenhouse, Lever and Ashby forms for you. They wait in the review box above.'],
+  ['Review, then Submit', 'Open each filled form, answer anything marked "to answer", then press Submit.'],
+  ['Apply on other sites yourself', 'For Naukri, Indeed and others: open the job, apply there, then press Mark applied.'],
+  ['Keep the list tidy', 'Save the ones you like, hide the rest. Everything you apply to shows in the Tracker.'],
+];
+const canAuto = (m) => m.ats && !['applied', 'preparing', 'submitting'].includes(m.application?.status);
 
 export default function JobsPage({ onNavigate }) {
   const queryClient = useQueryClient();
@@ -30,21 +45,42 @@ export default function JobsPage({ onNavigate }) {
   const [workMode, setWorkMode] = useState('');
   const [q, setQ] = useState(''); // applied search text
   const [draftQ, setDraftQ] = useState(''); // what's typed in the box
-  const [page, setPage] = useState(1);
   const [sort, setSort] = useState('fit');
   const [autoOnly, setAutoOnly] = useState(false); // only jobs auto-apply can fill
   const [all, setAll] = useState(false); // "Show all jobs found": ignore pay, age, experience and platform settings
+  const [foundToday, setFoundToday] = useState(false); // only matches from the last 24 hours
+  const [extra, setExtra] = useState(0); // rows added by "Load more"
 
-  const params = new URLSearchParams({ status, page, sort, ...(q && { q }), ...(workMode && { workMode }), ...(all && { all: '1' }), ...(autoOnly && { autoApply: '1' }) });
-  const jobs = useQuery({ queryKey: ['jobs', status, q, workMode, sort, page, all, autoOnly], queryFn: () => api(`/jobs?${params}`) });
+  const params = new URLSearchParams({
+    status,
+    sort,
+    limit: PAGE_SIZE + extra,
+    ...(q && { q }),
+    ...(workMode && { workMode }),
+    ...(all && { all: '1' }),
+    ...(autoOnly && { autoApply: '1' }),
+    ...(foundToday && { found: 'today' }),
+  });
+  const jobs = useQuery({
+    queryKey: ['jobs', status, q, workMode, sort, extra, all, autoOnly, foundToday],
+    queryFn: () => api(`/jobs?${params}`),
+    placeholderData: (prev) => prev, // keep rows on screen while the next page or batch loads
+  });
+  // shared with the Auto-apply box: today's count against the daily limit
+  const queue = useQuery({ queryKey: ['applyQueue'], queryFn: () => api('/apply/queue') });
+  // auto-apply uploads this PDF to every form; without it the server refuses to prepare
+  const profile = useQuery({ queryKey: ['profile'], queryFn: () => api('/profile') });
+  const noPdf = profile.data && !profile.data.resumePdf?.id;
+  const left = queue.data ? Math.max(0, queue.data.dailyLimit - queue.data.today) : MAX_PREPARE;
   // { run, running, error }: checked every few seconds while a background search runs
   const lastRun = useQuery({ queryKey: ['lastRun'], queryFn: () => api('/jobs/runs/latest'), refetchInterval: (q) => (q.state.data?.running ? 4000 : false) });
 
-  // Saved jobs show at once; opening the page also starts a background search if the last one is over an hour old.
+  // Saved jobs show at once from the database; opening (or reloading) the page also checks the free job boards in the
+  // background if the last search is over an hour old. Paid sources (Naukri, Indeed, JSearch) run only every 6 hours.
   useEffect(() => {
     api('/jobs/refresh', { method: 'POST' })
       .then((r) => r.started && queryClient.invalidateQueries({ queryKey: ['lastRun'] }))
-      .catch(() => {}); // the Search now button still works and shows its own errors
+      .catch(() => {}); // the Refresh button still works and shows its own errors
   }, [queryClient]);
   // A finished search (new run id) brings new jobs: reload the list.
   const runId = lastRun.data?.run?._id;
@@ -55,63 +91,147 @@ export default function JobsPage({ onNavigate }) {
   }, [runId, queryClient]);
 
   const search = useMutation({
+    meta: { success: 'Checking the free job boards. New jobs appear here when it finishes.' },
     mutationFn: () => api('/jobs/search', { method: 'POST' }),
     onSuccess: (run) => queryClient.setQueryData(['lastRun'], { run, running: false, error: null }),
   });
   const searching = search.isPending || lastRun.data?.running;
-  // Auto-apply: tick jobs on Greenhouse/Lever/Ashby forms, then Prepare; they appear in the review queue above.
+
+  // Ticked jobs, kept across pages. Whole matches, so bulk actions know titles and links.
   const [picked, setPicked] = useState([]);
-  const pick = (id) => setPicked(picked.includes(id) ? picked.filter((x) => x !== id) : picked.length < 20 ? [...picked, id] : picked);
+  const isPicked = (m) => picked.some((p) => p._id === m._id);
+  const pick = (m) => {
+    if (isPicked(m)) return setPicked(picked.filter((p) => p._id !== m._id));
+    if (picked.length >= MAX_PICK) return toast(`Up to ${MAX_PICK} jobs at a time. Act on these first.`, 'warning');
+    setPicked([...picked, m]);
+  };
+  const rows = jobs.data?.items ?? [];
+  const pageAllPicked = rows.length > 0 && rows.every(isPicked);
+  const pickPage = () => {
+    if (pageAllPicked) return setPicked(picked.filter((p) => !rows.some((m) => m._id === p._id)));
+    const add = rows.filter((m) => !isPicked(m)).slice(0, MAX_PICK - picked.length);
+    if (add.length < rows.filter((m) => !isPicked(m)).length) toast(`Selected ${add.length}: up to ${MAX_PICK} jobs at a time.`, 'warning');
+    setPicked([...picked, ...add]);
+  };
+  const autoPicked = picked.filter(canAuto);
+  const autoCount = Math.min(autoPicked.length, MAX_PREPARE, left);
+
+  const done = () => {
+    setPicked([]);
+    ['jobs', 'applyQueue', 'tracker', 'today'].forEach((key) => queryClient.invalidateQueries({ queryKey: [key] }));
+  };
   const prepare = useMutation({
-    mutationFn: () => api('/apply/prepare', { method: 'POST', body: { matchIds: picked } }),
+    meta: { success: (d) => d.queued > 0 && `Preparing ${d.queued} ${d.queued === 1 ? 'application' : 'applications'}. Follow each one in the Auto-apply review box.` },
+    mutationFn: () => api('/apply/prepare', { method: 'POST', body: { matchIds: autoPicked.slice(0, autoCount).map((m) => m._id) } }),
     onSuccess: () => {
-      setPicked([]);
-      queryClient.invalidateQueries({ queryKey: ['applyQueue'] });
-      queryClient.invalidateQueries({ queryKey: ['jobs'] });
+      const rest = picked.length - autoCount;
+      if (rest > 0) toast(`${rest} other ${rest === 1 ? 'job stays' : 'jobs stay'} ticked: apply on the job site, then press Mark applied.`, 'info');
+      setPicked(picked.filter((m) => !autoPicked.slice(0, autoCount).includes(m)));
+      ['jobs', 'applyQueue'].forEach((key) => queryClient.invalidateQueries({ queryKey: [key] }));
+      setTimeout(() => document.getElementById('auto-apply')?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 300);
     },
+  });
+  // Bulk save / hide / mark applied: one request per job, all at once.
+  const bulk = useMutation({
+    mutationFn: ({ action }) =>
+      Promise.all(
+        picked.map((m) =>
+          action === 'applied'
+            ? api('/tracker', { method: 'POST', body: { jobId: m.job._id, company: m.job.company, role: m.job.title, url: m.job.applyUrl || m.job.url } })
+            : api(`/jobs/${m._id}`, { method: 'PATCH', body: { status: action } }),
+        ),
+      ),
+    onSuccess: done,
+    meta: { success: (r, { action }) => `${r.length} ${r.length === 1 ? 'job' : 'jobs'} ${action === 'applied' ? 'marked applied and added to your Tracker' : MOVED[action]}` },
   });
   const move = useMutation({
     mutationFn: ({ id, status }) => api(`/jobs/${id}`, { method: 'PATCH', body: { status } }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['jobs'] }),
+    onSuccess: (_d, { id, status: to, from, title }) => {
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
+      if (from) toast(`${title}: ${MOVED[to]}`, 'success', { label: 'Undo', run: () => move.mutate({ id, status: from }) });
+    },
   });
 
   const filter = (fn) => (...args) => {
     fn(...args);
-    setPage(1);
+    setExtra(0);
   };
-  const filtered = q || workMode || autoOnly;
+  const filtered = q || workMode || autoOnly || foundToday;
 
   return (
-    <div className={picked.length ? "pb-24" : undefined}>
+    <div>
       <PageHeader
         title="Jobs"
         actions={
-          <button className="btn" onClick={() => search.mutate()} disabled={searching}>
+          <button className="btn" onClick={() => search.mutate()} disabled={searching} title="Checks the free job boards now. Naukri, Indeed and JSearch update automatically every 6 hours.">
             <Icon name="search" />
-            {searching ? 'Searching…' : 'Search now'}
+            {searching ? 'Refreshing…' : 'Refresh jobs'}
           </button>
         }
       >
-        {lastRun.data?.run ? (
-          <RunSummary run={lastRun.data.run} onNavigate={onNavigate} />
-        ) : (
-          'New matches arrive every six hours. Search now to get the first ones.'
-        )}
+        Jobs that match your roles, places and skills, scored by AI. Tick the ones you want and apply in one go.
       </PageHeader>
-      {lastRun.data?.running && !search.isPending && (
-        <p className="mb-4 rounded-lg bg-sunken px-3 py-2 text-sm text-muted" role="status">
-          Fetching new jobs in the background. Your saved jobs are below; new ones appear when it finishes.
-        </p>
+
+      {noPdf && (
+        <Notice tone="error" action={<button className="btn-outline" onClick={() => onNavigate('profile')}>Go to Settings</button>}>
+          <strong className="font-semibold">Auto-apply is off: no resume PDF.</strong> Every application form needs your resume, so upload your PDF in Settings
+          first. Until then you can still tick jobs to save, hide or mark them applied.
+        </Notice>
       )}
-      {(search.error?.message ?? lastRun.data?.error) && (
-        <p className="mb-4 rounded-lg bg-marigold-soft px-3 py-2 text-sm text-ink">{search.error?.message ?? lastRun.data.error}</p>
+      {lastRun.data?.error && <Notice tone="warning">The last automatic search had a problem: {lastRun.data.error}</Notice>}
+      {prepare.data?.skipped.length > 0 && (
+        <Notice tone="warning" onClose={prepare.reset}>
+          <strong className="font-semibold">Not prepared:</strong> {prepare.data.skipped.map((x) => `${x.job} (${x.reason})`).join('; ')}
+        </Notice>
       )}
 
+      <Today onNavigate={onNavigate} onNewToday={() => (filter(setFoundToday)(true), filter(setStatus)('new'))} />
+
+      <div className="mb-5 grid items-start gap-3 lg:grid-cols-2">
+        <Collapsible
+          id="jobs-last-update"
+          icon="search"
+          title="Last update"
+          summary={
+            searching ? (
+              <span className="animate-pulse font-medium text-cobalt">checking job boards…</span>
+            ) : lastRun.data?.run ? (
+              `${timeAgo(lastRun.data.run.createdAt)} · ${lastRun.data.run.newMatches} new for you`
+            ) : (
+              'no search yet'
+            )
+          }
+        >
+          {lastRun.data?.run ? (
+            <RunSummary run={lastRun.data.run} onNavigate={onNavigate} />
+          ) : (
+            <p className="text-muted">No search yet. Press Refresh jobs for the free job boards; Naukri, Indeed and JSearch arrive with the automatic update.</p>
+          )}
+          <p className="mt-1.5 text-xs text-muted">
+            <span className="font-medium text-ink">Naukri, Indeed and JSearch:</span> automatic, every 6 hours
+            {lastRun.data?.nextScheduled ? ` · next after ${clock(lastRun.data.nextScheduled)}` : ' · next within half an hour'}
+          </p>
+        </Collapsible>
+        {queue.data && (
+          <Quota
+            id="jobs-apply-quota"
+            label="Auto-apply submissions today"
+            used={queue.data.today}
+            limit={queue.data.dailyLimit}
+            note={
+              left
+                ? `${left} left. Only Submit counts; preparing and reviewing are free.`
+                : `Limit reached. The next slot opens ${untilText(queue.data.freesAt ?? Date.now() + 86_400_000)}; you can still prepare and review.`
+            }
+          />
+        )}
+      </div>
+
+      <Guide id="jobs" title="How applying works" steps={STEPS} />
       <ApplyQueue onChange={() => queryClient.invalidateQueries({ queryKey: ['jobs'] })} />
-      {prepare.isError && <p className="mb-4 rounded-lg bg-marigold-soft px-3 py-2 text-sm text-ink">{prepare.error.message}</p>}
 
-      {/* Toolbar */}
-      <div className="mb-3 flex flex-wrap items-center gap-3">
+      {/* Filters */}
+      <section className="panel-controls mb-3 flex flex-wrap items-center gap-3 p-3" aria-label="Filters">
         <div className="inline-flex rounded-lg border border-line bg-surface p-0.5" role="tablist" aria-label="Show">
           {TABS.map(([value, label]) => (
             <button
@@ -119,68 +239,63 @@ export default function JobsPage({ onNavigate }) {
               role="tab"
               aria-selected={status === value}
               onClick={() => filter(setStatus)(value)}
-              className={`rounded-md px-3 py-1 text-sm ${status === value ? 'bg-ink font-medium text-surface' : 'text-muted hover:text-ink'}`}
+              className={`rounded-md px-3 py-1 text-sm transition ${status === value ? 'bg-cobalt font-semibold text-on-accent shadow-sm' : 'text-muted hover:text-ink'}`}
             >
               {label}
             </button>
           ))}
         </div>
         <form
-          className="flex flex-1 flex-wrap justify-end gap-2"
+          className="relative min-w-48 flex-1"
           onSubmit={(e) => {
             e.preventDefault();
             filter(setQ)(draftQ.trim());
           }}
         >
-          <label className="relative min-w-48 flex-1 sm:max-w-72">
+          <label>
             <span className="sr-only">Search title, company or place</span>
             <Icon name="search" className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-faint" />
-            <input className="input pl-9" placeholder="Title, company or place" value={draftQ} onChange={(e) => setDraftQ(e.target.value)} />
-          </label>
-          <label>
-            <span className="sr-only">Work mode</span>
-            <select className="input w-auto" value={workMode} onChange={(e) => filter(setWorkMode)(e.target.value)}>
-              <option value="">Any work mode</option>
-              {Object.entries(MODE_LABEL).map(([value, label]) => (
-                <option key={value} value={value}>
-                  {label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label>
-            <span className="sr-only">Sort by</span>
-            <select className="input w-auto" value={sort} onChange={(e) => filter(setSort)(e.target.value)}>
-              <option value="fit">Best fit</option>
-              <option value="posted">Newest posted</option>
-              <option value="pay">Highest pay</option>
-              <option value="found">Recently found</option>
-            </select>
-          </label>
-          <label className="flex items-center gap-2 text-sm text-muted" title="Only Greenhouse, Lever and Ashby jobs: tick them, then Prepare">
-            <input type="checkbox" checked={autoOnly} onChange={(e) => filter(setAutoOnly)(e.target.checked)} />
-            Auto-apply only
-          </label>
-          <label className="flex items-center gap-2 text-sm text-muted" title="Includes jobs your pay, experience, date or platform settings would hide">
-            <input type="checkbox" checked={all} onChange={(e) => filter(setAll)(e.target.checked)} />
-            Show all jobs found
+            <input className="input pl-9" placeholder="Search title, company or place, then Enter" value={draftQ} onChange={(e) => setDraftQ(e.target.value)} />
           </label>
         </form>
-      </div>
+        <label>
+          <span className="sr-only">Work mode</span>
+          <select className="input w-auto" value={workMode} onChange={(e) => filter(setWorkMode)(e.target.value)}>
+            <option value="">Any work mode</option>
+            {Object.entries(MODE_LABEL).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          <span className="sr-only">Sort by</span>
+          <select className="input w-auto" value={sort} onChange={(e) => filter(setSort)(e.target.value)}>
+            <option value="fit">Sort: Best fit</option>
+            <option value="posted">Sort: Newest posted</option>
+            <option value="pay">Sort: Highest pay</option>
+            <option value="found">Sort: Recently found</option>
+          </select>
+        </label>
+        <div className="flex w-full flex-wrap gap-x-5 gap-y-2 border-t border-line pt-3 text-sm">
+          <Toggle checked={autoOnly} onChange={filter(setAutoOnly)} label="Auto-apply jobs only" hint="Greenhouse, Lever and Ashby: the app fills these forms" />
+          <Toggle checked={foundToday} onChange={filter(setFoundToday)} label="Found today" hint="Matches from the last 24 hours" />
+          <Toggle checked={all} onChange={filter(setAll)} label="Show all jobs found" hint="Includes jobs your pay, experience, date or platform settings hide" />
+        </div>
+      </section>
 
       {(jobs.data?.hiddenByPreferences > 0 || jobs.data?.closedOrJunk > 0) && (
         <p className="mb-3 text-sm text-muted">
-          {jobs.data.total} shown.
-          {jobs.data.closedOrJunk > 0 && ` ${jobs.data.closedOrJunk} hidden because they're closed or look like junk.`}
+          {jobs.data.closedOrJunk > 0 && `${jobs.data.closedOrJunk} hidden because they're closed or look like junk. `}
           {jobs.data.hiddenByPreferences > 0 && (
             <>
-              {' '}
               {jobs.data.hiddenByPreferences} hidden by your pay, experience, date or platform settings.{' '}
-              <button className="text-cobalt hover:underline" onClick={() => filter(setAll)(true)}>
+              <button className="font-semibold text-cobalt hover:underline" onClick={() => filter(setAll)(true)}>
                 Show them
               </button>
               {' · '}
-              <button className="text-cobalt hover:underline" onClick={() => onNavigate('preferences')}>
+              <button className="font-semibold text-cobalt hover:underline" onClick={() => onNavigate('preferences')}>
                 Change preferences
               </button>
             </>
@@ -188,60 +303,99 @@ export default function JobsPage({ onNavigate }) {
         </p>
       )}
       {jobs.isPending && <ListSkeleton />}
-      {jobs.isError && <p className="text-sm text-danger">{jobs.error.message}</p>}
-      {jobs.data?.items.length === 0 && (
-        <EmptyState status={status} filtered={filtered} onNavigate={onNavigate} onSearch={() => search.mutate()} searching={searching} />
-      )}
-      {jobs.data?.items.length > 0 && (
-        <ul className="panel divide-y divide-line overflow-hidden">
-          {jobs.data.items.map((m) => (
-            <JobRow key={m._id} match={m} onMove={(to) => move.mutate({ id: m._id, status: to })} busy={move.isPending} picked={picked.includes(m._id)} onPick={() => pick(m._id)} />
-          ))}
-        </ul>
-      )}
-
+      {/* shows as soon as one job is ticked, and stays in view while you scroll */}
       {picked.length > 0 && (
-        <div className="fixed inset-x-0 bottom-0 z-20 border-t border-line bg-surface/95 px-4 py-3 backdrop-blur lg:left-60">
-          <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-3">
-            <span className="text-sm font-medium">{picked.length} selected for auto-apply</span>
-            <span className="text-xs text-muted">AI fills each form with your profile and standard answers; you review before anything is submitted.</span>
-            <span className="ml-auto flex gap-2">
+        <div className="fade-in sticky top-2 z-20 mb-3 rounded-xl border border-cobalt/40 bg-surface px-4 py-3 shadow-lg" role="region" aria-label="Selected jobs">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <div className="text-sm">
+              <p className="font-semibold">
+                {picked.length} {picked.length === 1 ? 'job' : 'jobs'} selected
+              </p>
+              <p className="text-xs text-muted">
+                {autoPicked.length} can be auto-applied
+                {autoPicked.length > autoCount && ` (${autoCount} now: ${left < MAX_PREPARE ? `${left} left today` : `${MAX_PREPARE} at a time`})`} · {picked.length - autoPicked.length} apply on the job site
+              </p>
+            </div>
+            <div className="ml-auto flex flex-wrap gap-2">
               <button className="btn-ghost" onClick={() => setPicked([])}>
                 Clear
               </button>
-              <button className="btn" onClick={() => prepare.mutate()} disabled={prepare.isPending}>
-                <Icon name="sparkle" />
-                {prepare.isPending ? 'Starting…' : `Prepare ${picked.length} ${picked.length === 1 ? 'application' : 'applications'}`}
+              <button className="btn-outline" disabled={bulk.isPending} onClick={() => bulk.mutate({ action: 'hidden' })} title="Move them to Hidden">
+                <Icon name="hide" />
+                Hide
               </button>
-            </span>
+              <button className="btn-outline" disabled={bulk.isPending} onClick={() => bulk.mutate({ action: 'saved' })} title="Keep them in Saved">
+                <Icon name="bookmark" />
+                Save
+              </button>
+              <button className="btn-outline" disabled={bulk.isPending} onClick={() => bulk.mutate({ action: 'applied' })} title="You applied on the job site: add them to your Tracker">
+                <Icon name="check" />
+                Mark applied
+              </button>
+              <button
+                className="btn"
+                disabled={prepare.isPending || !autoCount || noPdf}
+                onClick={() => prepare.mutate()}
+                title={
+                  noPdf
+                    ? 'Upload your resume PDF in Settings first'
+                    : autoCount
+                      ? 'AI fills each form; you review before anything is submitted'
+                      : 'None of these are on Greenhouse, Lever or Ashby, or today’s limit is used'
+                }
+              >
+                <Icon name="sparkle" />
+                {prepare.isPending ? 'Starting…' : autoCount ? `Auto-apply ${autoCount}` : 'Auto-apply'}
+              </button>
+            </div>
           </div>
         </div>
       )}
-
-      {jobs.data && (page > 1 || jobs.data.hasMore) && (
-        <nav className="mt-4 flex items-center justify-between text-sm text-muted" aria-label="Pages">
-          <button className="btn-outline" disabled={page === 1} onClick={() => setPage(page - 1)}>
-            Previous
-          </button>
-          <span>Page {page}</span>
-          <button className="btn-outline" disabled={!jobs.data.hasMore} onClick={() => setPage(page + 1)}>
-            Next
-          </button>
-        </nav>
+      {jobs.isError && <Notice tone="error">Couldn't load jobs: {jobs.error.message}. Reload the page to try again.</Notice>}
+      {jobs.data?.items.length === 0 && <EmptyState status={status} filtered={filtered} onNavigate={onNavigate} onSearch={() => search.mutate()} searching={searching} />}
+      {rows.length > 0 && (
+        <div className="panel overflow-hidden">
+          <label className="flex cursor-pointer items-center gap-3 border-b border-line bg-sunken/50 px-5 py-2.5 text-sm">
+            <input type="checkbox" className="size-4 accent-cobalt" checked={pageAllPicked} onChange={pickPage} />
+            <span className="font-semibold">Select all shown</span>
+            <span className="ml-auto text-xs text-muted">{jobs.data.total} jobs</span>
+          </label>
+          <ul className={`divide-y divide-line transition-opacity ${jobs.isPlaceholderData ? 'opacity-60' : ''}`}>
+            {rows.map((m) => (
+              <JobRow
+                key={m._id}
+                match={m}
+                onMove={(to) => move.mutate({ id: m._id, status: to, from: m.status, title: m.job.title })}
+                busy={move.isPending}
+                picked={isPicked(m)}
+                onPick={() => pick(m)}
+              />
+            ))}
+          </ul>
+        </div>
       )}
+
+      {jobs.data && (
+        <Pager count={rows.length} total={jobs.data.total} onMore={jobs.data.hasMore ? () => setExtra(extra + PAGE_SIZE) : null} loading={jobs.isFetching} noun="jobs" />
+      )}
+
     </div>
   );
 }
 
+
+const clock = (d) => new Date(d).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const BY = { manual: 'by you', auto: 'on opening', schedule: 'automatic, all sources' };
+
 function RunSummary({ run, onNavigate }) {
   const failed = run.boards.filter((b) => b.error);
   const found = run.boards.reduce((n, b) => n + b.fetched, 0);
+  const waiting = (run.skipped ?? []).filter((s) => s.until && new Date(s.until) > Date.now());
   return (
-    <>
+    <div className="text-muted">
       <p>
-        Last searched {timeAgo(run.createdAt)}: {found} jobs looked at across {run.boards.length} searches,{' '}
-        <strong className="font-medium text-ink">{run.newMatches} new for you</strong>.
-        {run.liveness?.checked > 0 && ` ${run.liveness.checked} postings checked, ${run.liveness.closed} found closed.`}
+        {timeAgo(run.createdAt)} ({BY[run.trigger] ?? run.trigger}): looked at {found} jobs, <strong className="font-semibold text-ink">{run.newMatches} new for you</strong>.
+        {run.liveness?.checked > 0 && ` ${run.liveness.closed} of ${run.liveness.checked} checked postings had closed.`}
       </p>
       {run.terms?.length > 0 && (
         <p className="mt-0.5 text-xs">
@@ -250,17 +404,22 @@ function RunSummary({ run, onNavigate }) {
             <>
               {' '}
               (from your resume;{' '}
-              <button className="text-cobalt hover:underline" onClick={() => onNavigate('preferences')}>
-                set your own role keywords
+              <button className="font-semibold text-cobalt hover:underline" onClick={() => onNavigate('preferences')}>
+                set your own
               </button>
               )
             </>
           )}
         </p>
       )}
+      {waiting.length > 0 && (
+        <p className="mt-0.5 text-xs" title="Each free job board is checked at most once an hour, so clicking Refresh again is harmless.">
+          Checked recently, so skipped: {waiting.map((w) => `${SOURCE_LABEL[w.source] ?? w.source}${w.board ? ` (${w.board})` : ''} until ${clock(w.until)}`).join(', ')}
+        </p>
+      )}
       {failed.length > 0 && (
-        <details className="mt-1">
-          <summary className="cursor-pointer text-marigold">
+        <details className="mt-1 text-xs">
+          <summary className="cursor-pointer font-medium text-marigold">
             {failed.length} {failed.length === 1 ? 'source had a problem' : 'sources had problems'}
           </summary>
           <ul className="mt-1 space-y-0.5">
@@ -272,7 +431,7 @@ function RunSummary({ run, onNavigate }) {
           </ul>
         </details>
       )}
-    </>
+    </div>
   );
 }
 
@@ -286,7 +445,7 @@ function EmptyState({ status, filtered, onNavigate, onSearch, searching }) {
         : ['No new jobs yet', 'Upload your resume (or set role keywords and places), then search. New matches also arrive every six hours.'];
   return (
     <div className="panel px-6 py-14 text-center">
-      <p className="font-display text-xl font-semibold">{text[0]}</p>
+      <p className="text-xl font-semibold">{text[0]}</p>
       <p className="mx-auto mt-1 max-w-sm text-sm text-muted">{text[1]}</p>
       {status === 'new' && !filtered && (
         <div className="mt-5 flex justify-center gap-2">
@@ -294,7 +453,7 @@ function EmptyState({ status, filtered, onNavigate, onSearch, searching }) {
             Open preferences
           </button>
           <button className="btn" onClick={onSearch} disabled={searching}>
-            {searching ? 'Searching…' : 'Search now'}
+            {searching ? 'Refreshing…' : 'Refresh jobs'}
           </button>
         </div>
       )}
@@ -335,7 +494,6 @@ function ModeChip({ mode }) {
 
 function JobRow({ match, onMove, busy, picked, onPick }) {
   const appStatus = match.application?.status;
-  const canAutoApply = match.ats && !['applied', 'preparing', 'submitting'].includes(appStatus);
   const { job, status } = match;
   const [open, setOpen] = useState(false);
   const fresh = job.postedAt && Date.now() - new Date(job.postedAt) < FRESH_MS;
@@ -349,11 +507,10 @@ function JobRow({ match, onMove, busy, picked, onPick }) {
   }[status];
 
   return (
-    <li className={open ? 'bg-sunken/40' : undefined}>
+    <li className={`fade-in transition-colors ${picked ? 'bg-cobalt-soft/50' : open ? 'bg-sunken/40' : 'hover:bg-sunken/30'}`}>
       <div className="flex gap-4 px-5 py-4">
-        {/* a checkbox only where the app can fill the form; keeps the column aligned otherwise */}
-        <span className="w-4 shrink-0 pt-3">
-          {canAutoApply && <input type="checkbox" checked={picked} onChange={onPick} aria-label={`Select ${match.job.title} for auto-apply`} />}
+        <span className="shrink-0 pt-3">
+          <input type="checkbox" className="size-4 accent-cobalt" checked={picked} onChange={onPick} aria-label={`Select ${match.job.title}`} />
         </span>
         <FitBadge score={match.fit?.score} />
         <div className="min-w-0 flex-1">
@@ -366,11 +523,19 @@ function JobRow({ match, onMove, busy, picked, onPick }) {
           </p>
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-faint">
             <ModeChip mode={job.workMode} />
+            {!match.ats && (
+              <span
+                className="rounded-md border border-line px-1.5 py-0.5 font-medium text-muted"
+                title="The app doesn't fill forms on this site, to keep your accounts safe. Open the job, apply there, then press I applied here."
+              >
+                Apply on {job.via || PLATFORM[job.platform] || 'the job site'} yourself
+              </span>
+            )}
             {match.ats &&
               (appStatus ? (
                 <span className={`font-medium ${APPLY_STATUS[appStatus][1]}`}>{APPLY_STATUS[appStatus][0]}</span>
               ) : (
-                <span className="rounded-md bg-cobalt/10 px-1.5 py-0.5 font-medium text-cobalt" title="The app can fill this job's application form for you">
+                <span className="rounded-md bg-cobalt-soft px-1.5 py-0.5 font-semibold text-cobalt" title="Tick the box to let the app fill this job's application form">
                   Auto-apply
                 </span>
               ))}
@@ -406,6 +571,9 @@ function JobRow({ match, onMove, busy, picked, onPick }) {
               <Icon name={icon} />
             </button>
           ))}
+          <button className="btn-ghost px-2 text-pink" onClick={() => setOpen(true)} aria-label="Tailor resume for this job" title="Tailor resume for this job">
+            <Icon name="sparkle" />
+          </button>
           <button className="btn-ghost px-2" onClick={() => setOpen(!open)} aria-expanded={open} aria-label={open ? 'Hide details' : 'Show details'}>
             <Icon name="chevron" className={`size-4 transition-transform ${open ? 'rotate-180' : ''}`} />
           </button>
@@ -417,6 +585,62 @@ function JobRow({ match, onMove, busy, picked, onPick }) {
 }
 
 // Loaded only when opened: the list leaves out descriptions to stay small.
+// Applied on the job page yourself: puts it on the Tracker board.
+function AppliedHere({ job }) {
+  const queryClient = useQueryClient();
+  const add = useMutation({ meta: { inline: true },
+    mutationFn: () => api('/tracker', { method: 'POST', body: { jobId: job._id, company: job.company, role: job.title, url: job.applyUrl || job.url } }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['tracker'] }),
+  });
+  if (add.isSuccess) return <p className="-mt-2 text-xs text-ok">On your Tracker board under Applied.</p>;
+  return (
+    <div className="-mt-2">
+      <button className="btn-outline w-full" disabled={add.isPending} onClick={() => add.mutate()}>
+        <Icon name="check" />
+        I applied here
+      </button>
+      {add.isError && <p className="mt-1 text-xs text-danger">{add.error.message}</p>}
+    </div>
+  );
+}
+
+// What's waiting for you today, with a link to each place.
+function Today({ onNavigate, onNewToday }) {
+  const today = useQuery({ queryKey: ['today'], queryFn: () => api('/tracker/today') });
+  const t = today.data;
+  if (!t) return null;
+  const items = [
+    [t.newJobs, 'new jobs today', onNewToday, true, 'Show only jobs found in the last 24 hours'],
+    [t.appsReady, 'applications to review', () => document.getElementById('auto-apply')?.scrollIntoView({ behavior: 'smooth' }), true, 'Go to the Auto-apply box'],
+    [t.emailsReady, 'emails to send', () => onNavigate('email'), true, 'Open the Email page'],
+    [t.newReplies, t.newReplies === 1 ? 'new reply' : 'new replies', () => onNavigate('tracker'), true, 'Open the Tracker'],
+    [t.interviews, 'at interview', () => onNavigate('tracker'), false, 'Open the Tracker'],
+    [t.appliedThisWeek, 'applied this week', () => onNavigate('tracker'), false, 'See your application history'],
+  ];
+  const line = items.filter(([n, , , highlight]) => highlight && n).map(([n, label]) => `${n} ${label}`).join(' · ') || 'nothing waiting for you';
+  return (
+    <Collapsible id="jobs-today" icon="tracker" title="Today" summary={line} className="mb-5">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+      {items.map(([n, label, go, highlight, hint]) => (
+        <button
+          key={label}
+          onClick={go}
+          title={hint}
+          className={`group rounded-xl border px-3 py-2.5 text-left transition hover:-translate-y-px hover:shadow-md ${
+            highlight && n ? 'border-cobalt/30 bg-cobalt-soft' : 'border-line bg-surface hover:border-cobalt/40'
+          }`}
+        >
+          <span className={`block text-2xl font-semibold ${highlight && n ? 'text-cobalt' : ''}`}>{n}</span>
+          <span className="flex items-center gap-1 text-xs font-medium text-muted group-hover:text-ink">
+            {label} <span aria-hidden="true">→</span>
+          </span>
+        </button>
+      ))}
+      </div>
+    </Collapsible>
+  );
+}
+
 function JobDetails({ matchId }) {
   const detail = useQuery({ queryKey: ['job', matchId], queryFn: () => api(`/jobs/${matchId}`) });
   if (detail.isPending) return <p className="px-5 pb-5 text-sm text-muted">Loading details…</p>;
@@ -425,6 +649,7 @@ function JobDetails({ matchId }) {
   return (
     <div className="grid gap-6 border-t border-line px-5 py-5 md:grid-cols-[1fr_280px]">
       <div className="min-w-0 space-y-6">
+        <TailorCard jobId={job._id} />
         <FitExplained fit={fit} ai={ai} matchId={matchId} />
         <JobAtsCheck matchId={matchId} />
         <h3 className="text-sm font-semibold">About the role</h3>
@@ -444,6 +669,7 @@ function JobDetails({ matchId }) {
               ? `Couldn't confirm it's open: ${job.liveness.reason.toLowerCase()}.`
               : 'Not checked yet; the next search checks it.'}
         </p>
+        <AppliedHere job={job} />
         <Contacts matchId={matchId} initial={job.contacts} />
       </aside>
     </div>
@@ -454,7 +680,7 @@ const KIND_LABEL = { hiring: 'Hiring', general: 'General', personal: 'From the j
 
 function Contacts({ matchId, initial }) {
   const [website, setWebsite] = useState('');
-  const find = useMutation({
+  const find = useMutation({ meta: { inline: true },
     mutationFn: () => api(`/jobs/${matchId}/contacts`, { method: 'POST', body: website ? { website: website.trim() } : {} }),
   });
   const contacts = find.data ?? (initial?.checkedAt ? initial : null);
@@ -516,9 +742,11 @@ function Contacts({ matchId, initial }) {
 // The 0–100 rule score: bold when strong, quieter as it drops. Not a grade, an ordering.
 function FitBadge({ score }) {
   if (score == null) return <span className="w-10 shrink-0" />;
-  const tone = score >= 75 ? 'border-ink text-ink' : score >= 50 ? 'border-line text-muted' : 'border-line text-faint';
+  // pink = AI: strong fits filled, fair ones tinted, weak ones plain
+  const tone =
+    score >= 75 ? 'border-transparent bg-pink text-on-accent' : score >= 50 ? 'border-pink/30 bg-pink-soft text-pink' : 'border-line text-faint';
   return (
-    <span className={`grid size-10 shrink-0 place-items-center rounded-lg border font-display text-base font-semibold ${tone}`} title="Fit score out of 100">
+    <span className={`grid size-10 shrink-0 place-items-center rounded-lg border text-base font-semibold ${tone}`} title={`Fit score: ${score} out of 100`}>
       {score}
     </span>
   );
@@ -545,7 +773,7 @@ const PARTS = [
 
 function FitExplained({ fit, ai, matchId }) {
   const queryClient = useQueryClient();
-  const review = useMutation({
+  const review = useMutation({ meta: { inline: true },
     mutationFn: () => api(`/jobs/${matchId}/review`, { method: 'POST' }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['job', matchId] });

@@ -6,8 +6,11 @@ import { JobMatch } from '../models/JobMatch.js';
 import { Profile } from '../models/Profile.js';
 import { AutoApply } from '../models/AutoApply.js';
 import { readPdf } from '../resume/storage.js';
+import { tailoredPdfFor, tailoringOn } from '../resume/tailorJob.js';
 import { formFor, launch, openForm, readForm, fillForm, CONFIRMED } from './form.js';
 import { answerForm } from './answer.js';
+import { syncTracked } from '../tracker/track.js';
+import { mailAccountOf } from '../mail/send.js';
 
 // The work behind auto-apply, done in the background one form at a time per user:
 //   prepare: open the form in a hidden browser, decide answers, fill it, screenshot it -> "prepared" (you review)
@@ -30,12 +33,18 @@ async function fail(id, err) {
   await app.save();
 }
 
-// The resume PDF from your Profile, as a file the browser can upload.
-async function resumeFile(profile) {
-  if (!profile?.resumePdf?.id) throw new Error('Upload your resume PDF on the Profile page first');
+const pdfName = (profile) => `${(profile.data?.contact?.name || 'Resume').replace(/[^\w .-]+/g, '')} - Resume.pdf`;
+// The resume this application sends, as a file the browser can upload: the one tailored to this job,
+// unless there is none or you chose your own. Same file name either way.
+// app.resumePdfId records the tailored PDF used, so the Tracker can show what the company got.
+export const usesTailored = (app) => Boolean(app?.resumePdfId);
+async function resumeFile(profile, app) {
+  const tailored = !app.useOriginal && tailoringOn(profile) ? await tailoredPdfFor(app.userId, app.jobId._id ?? app.jobId) : null;
+  if (!tailored && !profile?.resumePdf?.id) throw new Error('Upload your resume PDF in Settings first');
+  app.resumePdfId = tailored ?? undefined;
   const dir = await mkdtemp(join(tmpdir(), 'jt-apply-'));
-  const file = join(dir, `${(profile.data?.contact?.name || 'Resume').replace(/[^\w .-]+/g, '')} - Resume.pdf`);
-  await writeFile(file, await readPdf(profile.resumePdf.id));
+  const file = join(dir, pdfName(profile));
+  await writeFile(file, await readPdf(tailored ?? profile.resumePdf.id));
   return file;
 }
 
@@ -63,21 +72,32 @@ export async function queuePrepare(userId, matchIds) {
   return { queued: queued.length, skipped };
 }
 
+// The step an application is on right now, saved straight away so the review box can show it live.
+const step = (id, name) => AutoApply.updateOne({ _id: id }, { step: name, stepAt: new Date() });
+
 async function prepareOne(id) {
-  const app = await AutoApply.findById(id).populate('jobId', 'title company locations');
+  const app = await AutoApply.findById(id).populate('jobId');
   const profile = await Profile.findOne({ userId: app.userId });
-  if (!profile?.data) throw new Error('Upload your resume on the Profile page first');
-  const resumePath = await resumeFile(profile);
+  if (!profile?.data) throw new Error('Upload your resume in Settings first');
+  await step(id, 'Tailoring your resume');
+  const resumePath = await resumeFile(profile, app); // tailors to this job first (shared with HR emails)
+  await step(id, 'Opening the application form');
   const browser = await launch(true);
   try {
     const page = await openForm(browser, app.formUrl);
+    await step(id, 'Reading the questions');
     const questions = await readForm(page);
     if (!questions.length) throw new Error('No application form found on that page (the job may be closed)');
-    const fields = await answerForm(questions, { profile: profile.data, answers: profile.applyAnswers, job: app.jobId });
+    // the form's email field gets your apply email (Settings > Sending email), so replies land in the inbox the Tracker reads
+    const account = await mailAccountOf(app.userId);
+    const data = account ? { ...profile.data, contact: { ...profile.data.contact, email: account.user } } : profile.data;
+    await step(id, 'Writing answers');
+    const fields = await answerForm(questions, { profile: data, answers: profile.applyAnswers, job: app.jobId });
+    await step(id, 'Filling in the form');
     const missed = await fillForm(page, fields, resumePath);
     for (const f of fields) if (missed.includes(f.id)) f.needsYou = true;
-    app.screenshot = await page.screenshot({ fullPage: true, type: 'jpeg', quality: 60 });
-    Object.assign(app, { fields, status: 'prepared', jobId: app.jobId._id });
+    app.screenshot = await page.screenshot({ fullPage: true, type: 'jpeg', quality: 40, scale: 'css' }); // css scale: 1x even on hi-DPI, a fraction of the size
+    Object.assign(app, { fields, status: 'prepared', jobId: app.jobId._id, step: undefined, stepAt: undefined });
     await app.save();
   } finally {
     await browser.close();
@@ -103,16 +123,19 @@ const blankRequired = (app) => app.fields.filter((f) => f.required && f.kind !==
 async function submitOne(id) {
   const app = await AutoApply.findById(id);
   const profile = await Profile.findOne({ userId: app.userId });
-  const resumePath = await resumeFile(profile);
+  const resumePath = await resumeFile(profile, app);
   // A required answer is still blank: the company's form would reject it, so hand it to you.
   if (blankRequired(app).length) return openForYou(app, resumePath, `${blankRequired(app).length} required question(s) still need your answer`);
 
+  await step(id, 'Opening the application form');
   const browser = await launch(true);
   let reason;
   try {
     const page = await openForm(browser, app.formUrl);
     await readForm(page);
+    await step(id, 'Filling in the form');
     await fillForm(page, app.fields, resumePath);
+    await step(id, 'Submitting and waiting for confirmation');
     await page.waitForTimeout(1500); // uploads finish
     const captcha = await page.locator('iframe[src*="recaptcha/api2/anchor"], iframe[src*="hcaptcha"], iframe[title*="challenge" i]').count();
     const submit = page.getByRole('button', { name: /submit( your)? application|^submit$|^apply( now)?$/i }).last();
@@ -127,6 +150,7 @@ async function submitOne(id) {
       if (confirmed) {
         Object.assign(app, { status: 'applied', appliedAt: new Date(), confirmation: await page.screenshot({ type: 'jpeg', quality: 60 }) });
         await app.save();
+        await syncTracked(app.userId);
         return;
       }
       reason = captcha ? 'The form asked for a CAPTCHA' : 'The form did not confirm (it may show an error or a CAPTCHA)';
@@ -158,6 +182,7 @@ async function watchForConfirmation(browser, page, id) {
       const app = await AutoApply.findById(id);
       Object.assign(app, { status: 'applied', appliedAt: new Date(), confirmation, error: undefined });
       await app.save();
+      await syncTracked(app.userId);
       break;
     }
     await new Promise((r) => setTimeout(r, 3000));
@@ -168,7 +193,7 @@ async function watchForConfirmation(browser, page, id) {
 // "Open to submit" by hand (any status but applied).
 export async function openNow(app) {
   const profile = await Profile.findOne({ userId: app.userId });
-  await openForYou(app, await resumeFile(profile), 'Opened by you');
+  await openForYou(app, await resumeFile(profile, app), 'Opened by you');
 }
 
 // A restart stops the background queue: anything mid-way is marked failed so you can retry it.

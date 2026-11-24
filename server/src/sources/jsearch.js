@@ -7,6 +7,7 @@ import { toJob, countryName, countryCode } from '../jobs/normalize.js';
 // and scrape.js stops at JSEARCH_MONTHLY_LIMIT. Endpoint and fields checked against the live API on 2026-11-13.
 const MAX_CALLS_PER_RUN = 2;
 export const minGapMs = 12 * 3600_000;
+export const monthlyLimit = Number(process.env.JSEARCH_MONTHLY_LIMIT) || 150; // free tier is about 200
 
 export function plan(prefs, terms, { callsLeft }) {
   if (!process.env.JSEARCH_API_KEY || !terms.length) return [];

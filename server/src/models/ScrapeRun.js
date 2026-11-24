@@ -11,6 +11,8 @@ const scrapeRunSchema = new mongoose.Schema(
     // One entry per API call: a company board ({ source: 'lever', board: 'spotify' }) or a site search
     // ({ source: 'freehire', board: 'in Bengaluru, India' }), with how many jobs came back and were kept.
     boards: [{ _id: false, source: String, board: String, fetched: Number, kept: Number, error: String }],
+    // not called this time: checked within the hour (until = next allowed), or its monthly budget is used
+    skipped: [{ _id: false, source: String, board: String, until: Date, reason: String }],
     newJobs: { type: Number, default: 0 }, // jobs never seen before by anyone
     newMatches: { type: Number, default: 0 }, // jobs newly added to your feed
     liveness: { checked: Number, closed: Number }, // still-open checks done in this run

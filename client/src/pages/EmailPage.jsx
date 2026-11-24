@@ -1,7 +1,19 @@
-import { Fragment, useEffect, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '../api.js';
-import { Icon, PageHeader, timeAgo } from '../components/ui.jsx';
+import { Guide, Icon, Notice, PageHeader, Pager, Quota, timeAgo, toast, usePaged, goToSettings, Toggle } from '../components/ui.jsx';
+import { TailorCard } from '../components/TailorCard.jsx';
+import { MailAccount } from '../components/MailAccount.jsx';
+
+const STEPS = [
+  ['Find HR contacts', 'The table fills itself from your top jobs. Add more with Find more HR, Add contact or Paste a list.'],
+  ['Tick the people to email', 'Tick rows, or the top box for the whole page. Up to 25 at a time.'],
+  ['Let AI write', 'Write N emails drafts one email per person for that role, with your resume attached.'],
+  ['Check each email', 'Open a row with Check to read it, edit it, and fix any warning.'],
+  ['Send', 'Tick ready rows and press Send. They go out a little apart, from the Gmail you connected in Settings.'],
+  ['Watch replies', 'Every sent email becomes a Tracker card; replies in Gmail move it forward.'],
+];
+const MAX_PICK = 25;
 
 // One list for emailing HR: every HR contact with company, role, name and email. Tick one or many ->
 // AI writes each email -> check them in the row -> tick and Send. Nothing is sent without your click.
@@ -10,19 +22,27 @@ const FILTERS = [
   ['all', 'All'],
   ['new', 'Not written'],
   ['ready', 'Ready'],
-  ['sent', 'Sent'],
+  ['emailed', 'Already emailed'],
 ];
 
+const shortDate = (d) => new Date(d).toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+
 // Where a row stands: what the Status column says and which actions it allows.
-function stateOf(c) {
+function stateOf(c, repeatDays) {
   const m = c.mail;
   if (c.writing) return { key: 'writing', label: 'Writing…', tone: 'text-cobalt' };
   if (m?.status === 'queued') return { key: 'sending', label: 'Sending…', tone: 'text-cobalt' };
-  if (m && ['draft', 'approved'].includes(m.status)) return { key: 'ready', label: 'Ready', tone: 'text-ok', canSend: true };
+  const again = c.lastContactedAt && `Emailed before, on ${shortDate(c.lastContactedAt)}`;
+  if (m && ['draft', 'approved'].includes(m.status)) return { key: 'ready', label: 'Ready', tone: 'text-ok', canSend: true, hint: again };
   if (m?.status === 'failed') return { key: 'ready', label: "Didn't send", tone: 'text-danger', canSend: true };
-  if (m?.status === 'sent' && c.recent) return { key: 'sent', label: `Sent ${timeAgo(m.sentAt)}`, tone: 'text-muted' };
-  if (!c.sendable) return { key: 'none', label: c.email ? 'Unverified email' : 'No email', tone: 'text-faint' };
-  return { key: 'new', label: m?.status === 'sent' ? `Sent ${timeAgo(m.sentAt)}` : 'Not written', tone: 'text-muted', canWrite: true };
+  // People you already emailed live in their own tab: waiting until they can be emailed again, then
+  // available again, but only after you confirm (RepeatConfirm).
+  if (m?.status === 'sent' && c.recent)
+    return { key: 'emailed', label: `Sent ${timeAgo(m.sentAt)}`, tone: 'text-ok', hint: repeatDays && `Can email again ${shortDate(new Date(m.sentAt).getTime() + repeatDays * 86_400_000)}` };
+  if (m?.status === 'sent') return { key: 'emailed', label: 'Can email again', tone: 'text-cobalt', hint: `Last emailed ${shortDate(m.sentAt)}`, canWrite: true };
+  if (!c.sendable)
+    return { key: 'none', label: c.email ? 'Unverified email' : 'No email', tone: 'text-faint', hint: c.email ? 'Not sent to: it may bounce' : 'Find their email to write' };
+  return { key: 'new', label: 'Not written', tone: 'text-muted', canWrite: true };
 }
 
 export default function EmailPage({ onNavigate }) {
@@ -50,17 +70,30 @@ export default function EmailPage({ onNavigate }) {
   const [selected, setSelected] = useState([]);
   const [openRow, setOpenRow] = useState(null);
   const [panel, setPanel] = useState(null); // 'add' | 'paste'
+  const [repeat, setRepeat] = useState(null); // { action, list, go }: waiting for your OK to email people again
+  // Writing or sending to anyone you emailed before asks first (the server also refuses without the OK).
+  const guard = (action, list, go) => (list.some((c) => c.lastContactedAt) ? setRepeat({ action, list, go }) : go(list, false));
 
-  const discover = useMutation({ mutationFn: () => api('/contacts/discover', { method: 'POST' }), onSuccess: refresh });
-  const prepare = useMutation({ mutationFn: () => api('/outreach/prepare', { method: 'POST' }), onSuccess: refresh });
-  const remove = useMutation({ mutationFn: (id) => api(`/contacts/${id}`, { method: 'DELETE' }), onSuccess: refresh });
+  const discover = useMutation({
+    mutationFn: () => api('/contacts/discover', { method: 'POST' }),
+    onSuccess: refresh,
+    meta: { success: (d) => `Checked ${d.checked} company sites: ${d.found ? `${d.found} new contacts added` : 'no new contacts this time'}` },
+  });
+  const prepare = useMutation({
+    mutationFn: () => api('/outreach/prepare', { method: 'POST' }),
+    onSuccess: (d) => (refresh(), d.writing === 0 && toast('No new contacts to write to right now. Find more HR or add some.', 'info')),
+    meta: { success: (d) => d.writing > 0 && `Writing ${d.writing} emails. They show as Ready when done.` },
+  });
+  const remove = useMutation({ mutationFn: (id) => api(`/contacts/${id}`, { method: 'DELETE' }), onSuccess: refresh, meta: { success: 'Contact deleted' } });
   const write = useMutation({
-    mutationFn: (contactIds) => api('/outreach/drafts', { method: 'POST', body: { contactIds } }),
+    mutationFn: ({ ids, confirmRepeat }) => api('/outreach/drafts', { method: 'POST', body: { contactIds: ids, confirmRepeat } }),
     onSuccess: () => (setSelected([]), refresh()),
+    meta: { success: (d) => d.writing > 0 && `AI is writing ${d.writing} ${d.writing === 1 ? 'email' : 'emails'}. Rows turn Ready when done.` },
   });
   const send = useMutation({
-    mutationFn: (ids) => api('/outreach/send', { method: 'POST', body: { ids, approve: true } }),
+    mutationFn: ({ ids, confirmRepeat }) => api('/outreach/send', { method: 'POST', body: { ids, approve: true, confirmRepeat } }),
     onSuccess: () => (setSelected([]), refresh()),
+    meta: { success: (d) => d.queued > 0 && `${d.queued} ${d.queued === 1 ? 'email is' : 'emails are'} sending, a little apart. Each becomes a Tracker card.` },
   });
 
   const s = status.data;
@@ -69,16 +102,29 @@ export default function EmailPage({ onNavigate }) {
   const rows = all.filter(
     (c) =>
       (!onlyActive || c.jobs.length || c.source === 'manual' || c.mail) &&
-      (filter === 'all' || stateOf(c).key === filter) &&
+      // "All" is your to-do list: people you already emailed are only in "Already emailed"
+      (filter === 'all' ? stateOf(c, s?.repeatDays).key !== 'emailed' : stateOf(c, s?.repeatDays).key === filter) &&
       (!q || `${c.company} ${c.name ?? ''} ${c.email ?? ''} ${c.position ?? ''} ${c.jobs[0]?.title ?? ''}`.toLowerCase().includes(q)),
   );
-  const pickable = rows.filter((c) => stateOf(c).canWrite || stateOf(c).canSend);
   const chosen = all.filter((c) => selected.includes(c._id));
-  const toWrite = chosen.filter((c) => stateOf(c).canWrite);
-  const toSend = chosen.filter((c) => stateOf(c).canSend);
-  const allSelected = pickable.length > 0 && pickable.every((c) => selected.includes(c._id));
-  const toggle = (id) => setSelected(selected.includes(id) ? selected.filter((x) => x !== id) : selected.length < 25 ? [...selected, id] : selected);
-  const count = (key) => all.filter((c) => stateOf(c).key === key).length;
+  const toWrite = chosen.filter((c) => stateOf(c, s?.repeatDays).canWrite);
+  const toSend = chosen.filter((c) => stateOf(c, s?.repeatDays).canSend);
+  const { visible, pager } = usePaged(rows);
+  const pagePickable = visible.filter((c) => stateOf(c, s?.repeatDays).canWrite || stateOf(c, s?.repeatDays).canSend);
+  const allSelected = pagePickable.length > 0 && pagePickable.every((c) => selected.includes(c._id));
+  const toggle = (id) => {
+    if (selected.includes(id)) return setSelected(selected.filter((x) => x !== id));
+    if (selected.length >= MAX_PICK) return toast(`Up to ${MAX_PICK} at a time. Write or send these first.`, 'warning');
+    setSelected([...selected, id]);
+  };
+  const selectPage = () => {
+    if (allSelected) return setSelected(selected.filter((id) => !pagePickable.some((c) => c._id === id)));
+    const add = pagePickable.map((c) => c._id).filter((id) => !selected.includes(id));
+    const room = MAX_PICK - selected.length;
+    if (add.length > room) toast(`Selected the first ${room}: up to ${MAX_PICK} at a time.`, 'warning');
+    setSelected([...selected, ...add.slice(0, Math.max(0, room))]);
+  };
+  const count = (key) => all.filter((c) => stateOf(c, s?.repeatDays).key === key).length;
   const noPdf = profile.data && !profile.data.resumePdf?.id;
 
   return (
@@ -92,92 +138,125 @@ export default function EmailPage({ onNavigate }) {
           </button>
         }
       >
-        HR contacts at companies with active jobs. Tick one or many and AI writes each email for that role; check them, then send.
+        Email HR people directly at companies with jobs that fit you. AI writes each email; nothing is sent until you press Send.
       </PageHeader>
 
-      {s && (
-        <div className="mb-5 grid gap-3 sm:grid-cols-3">
-          <Stat label="Sent today" value={`${s.sentToday} / ${s.dailyGoal}`} bar={Math.min(1, s.sentToday / s.dailyGoal)} />
-          <Stat label="Ready to send" value={count('ready')} note={s.preparing ? 'Writing more…' : null} />
-          <Stat label="Streak" value={`${s.streak} ${s.streak === 1 ? 'day' : 'days'}`} note={`Limit ${s.dailyLimit} in 24 hours`} />
-        </div>
-      )}
       {noPdf && (
-        <p className="mb-4 rounded-lg bg-marigold-soft px-3 py-2 text-sm text-ink">
-          Upload your resume PDF first: every email attaches it, so none can be written until then.{' '}
-          <button className="font-medium text-cobalt hover:underline" onClick={() => onNavigate('profile')}>
-            Go to Profile
-          </button>
-        </p>
+        <Notice tone="warning" action={<button className="btn-outline" onClick={() => onNavigate('profile')}>Go to Settings</button>}>
+          <strong className="font-semibold">Upload your resume PDF first.</strong> Every email attaches it, so none can be written until then.
+        </Notice>
       )}
-      {s && !s.gmail && (
-        <p className="mb-4 rounded-lg bg-sunken px-3 py-2 text-sm text-muted">
-          Gmail isn't connected yet, so emails can be written and checked but not sent. Add <code>GMAIL_USER</code> and <code>GMAIL_APP_PASSWORD</code> to{' '}
-          <code>server/.env</code> when you're ready.
-        </p>
+      {s && !s.gmail && <MailAccount compact onNavigate={onNavigate} />}
+      {s?.sentLast24h >= s?.dailyLimit && (
+        <Notice tone="error">
+          <strong className="font-semibold">Daily limit reached ({s.dailyLimit} emails).</strong> You can still write and check emails; sending opens up again as the
+          oldest of today's emails passes 24 hours.
+        </Notice>
       )}
-      {[prepare, write, send, discover].map((m, i) => m.isError && <p key={i} className="mb-4 text-sm text-danger">{m.error.message}</p>)}
-      {prepare.data?.writing === 0 && <p className="mb-4 text-sm text-marigold">No new contacts to write to right now.</p>}
-      {send.data && (
-        <p className="mb-4 text-sm text-ok">
-          {send.data.queued} sending, a little apart.
-          {send.data.skipped.length > 0 && <span className="text-marigold"> Held back: {send.data.skipped.map((x) => `${x.to} (${x.reason})`).join('; ')}</span>}
-        </p>
+      {send.data?.skipped.length > 0 && (
+        <Notice tone="warning" onClose={send.reset}>
+          <strong className="font-semibold">{send.data.skipped.length} held back:</strong> {send.data.skipped.map((x) => `${x.to} (${x.reason})`).join('; ')}
+        </Notice>
       )}
-      {write.data?.skipped.length > 0 && <p className="mb-4 text-xs text-marigold">Skipped: {write.data.skipped.map((x) => `${x.contact} (${x.reason})`).join('; ')}</p>}
+      {write.data?.skipped.length > 0 && (
+        <Notice tone="warning" onClose={write.reset}>
+          <strong className="font-semibold">Not written:</strong> {write.data.skipped.map((x) => `${x.contact} (${x.reason})`).join('; ')}
+        </Notice>
+      )}
       {s?.lastPrepared?.skipped?.length > 0 && !s.preparing && (
-        <p className="mb-4 text-xs text-marigold">Last writing run skipped: {s.lastPrepared.skipped.map((x) => `${x.contact} (${x.reason})`).join('; ')}</p>
+        <Notice tone="info">Last automatic run skipped: {s.lastPrepared.skipped.map((x) => `${x.contact} (${x.reason})`).join('; ')}</Notice>
       )}
-      {contacts.data?.finding && (
-        <p className="mb-4 rounded-lg bg-sunken px-3 py-2 text-sm text-muted" role="status">
-          Looking for more HR contacts on your top jobs' posts and company websites…
-        </p>
-      )}
+      {contacts.data?.finding && <Notice tone="info">Looking for more HR contacts on your top jobs' posts and company websites…</Notice>}
 
-      {/* toolbar */}
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <div className="inline-flex rounded-lg border border-line bg-surface p-0.5" role="tablist" aria-label="Show">
-          {FILTERS.map(([key, label]) => (
-            <button
-              key={key}
-              role="tab"
-              aria-selected={filter === key}
-              onClick={() => setFilter(key)}
-              className={`rounded-md px-3 py-1 text-sm ${filter === key ? 'bg-ink font-medium text-surface' : 'text-muted hover:text-ink'}`}
-            >
-              {label}
-              {key !== 'all' && contacts.data ? ` (${count(key)})` : ''}
-            </button>
-          ))}
+      {s?.from && (
+        <Notice tone="success" action={<button className="btn-outline" onClick={() => goToSettings(onNavigate, 'email')}>Test or change</button>}>
+          Sending from <strong className="font-semibold">{s.from}</strong>. Replies to it update your Tracker.
+        </Notice>
+      )}
+      {s && (
+        <div className="mb-5 grid items-start gap-3 sm:grid-cols-3">
+          <div className="sm:col-span-2">
+            <Quota
+              id="email-quota"
+              label="Emails sent in the last 24 hours"
+              used={s.sentLast24h}
+              limit={s.dailyLimit}
+              goal={s.dailyGoal}
+              note={`Goal ${s.dailyGoal} a day (the mark on the bar). Rules: one email per company per day, and no repeat to the same person within ${s.repeatDays} days.`}
+            />
+          </div>
+          <Stat label="Ready to send" value={count('ready')} note={s.preparing ? 'AI is writing more…' : `Streak: ${s.streak} ${s.streak === 1 ? 'day' : 'days'} in a row`} />
         </div>
-        <input className="input w-full sm:w-60" placeholder="Search company, role, name, email" value={query} onChange={(e) => setQuery(e.target.value)} />
-        <label className="flex items-center gap-2 text-sm text-muted">
-          <input type="checkbox" checked={onlyActive} onChange={() => setOnlyActive(!onlyActive)} />
-          Only companies with active jobs
-        </label>
-        <span className="ml-auto flex flex-wrap gap-2">
-          <button className="btn-ghost" onClick={() => setPanel(panel === 'add' ? null : 'add')}>
-            Add contact
-          </button>
-          <button className="btn-ghost" onClick={() => setPanel(panel === 'paste' ? null : 'paste')}>
-            Paste a list
-          </button>
-          <button className="btn-ghost" onClick={() => discover.mutate()} disabled={discover.isPending}>
-            <Icon name="search" />
-            {discover.isPending ? 'Finding…' : 'Find more HR'}
-          </button>
-        </span>
-      </div>
-      {discover.data && <p className="mb-3 text-sm text-muted">Checked {discover.data.checked} company sites, found {discover.data.found} new contacts.</p>}
+      )}
+      <Guide id="email" title="How emailing HR works" steps={STEPS} />
+      {/* toolbar: what to show (tabs, search, filter) on top, ways to add contacts below */}
+      <section className="panel-controls mb-3 p-3" aria-label="Filters">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center">
+          <div className="-mx-1 overflow-x-auto px-1 pb-0.5">
+            <div className="inline-flex rounded-lg border border-line bg-surface p-1" role="tablist" aria-label="Show">
+              {FILTERS.map(([key, label]) => {
+                const active = filter === key;
+                return (
+                  <button
+                    key={key}
+                    role="tab"
+                    aria-selected={active}
+                    onClick={() => setFilter(key)}
+                    className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm whitespace-nowrap transition ${active ? 'bg-cobalt font-semibold text-on-accent shadow-sm' : 'text-muted hover:bg-sunken hover:text-ink'}`}
+                  >
+                    {label}
+                    {contacts.data && (
+                      <span className={`rounded-full px-1.5 text-xs font-medium tabular-nums ${active ? 'bg-on-accent/20' : 'bg-sunken text-muted'}`}>
+                        {key === 'all' ? all.filter((c) => stateOf(c, s?.repeatDays).key !== 'emailed').length : count(key)}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+          <label className="relative min-w-0 flex-1">
+            <span className="sr-only">Search contacts</span>
+            <Icon name="search" className="pointer-events-none absolute top-1/2 left-3 size-4 -translate-y-1/2 text-faint" />
+            <input className="input pl-9" placeholder="Search company, role, name or email" value={query} onChange={(e) => setQuery(e.target.value)} />
+          </label>
+        </div>
+        <div className="mt-3 flex flex-col gap-3 border-t border-line pt-3 sm:flex-row sm:items-center">
+          <Toggle checked={onlyActive} onChange={setOnlyActive} label="Only companies with active jobs" hint="Hides contacts whose company has no open job that fits you" />
+          <div className="flex flex-wrap gap-2 sm:ml-auto">
+            <button className="btn-outline" onClick={() => setPanel(panel === 'add' ? null : 'add')} aria-expanded={panel === 'add'}>
+              <Icon name="plus" />
+              Add contact
+            </button>
+            <button className="btn-outline" onClick={() => setPanel(panel === 'paste' ? null : 'paste')} aria-expanded={panel === 'paste'}>
+              <Icon name="list" />
+              Paste a list
+            </button>
+            <button className="btn-outline" onClick={() => discover.mutate()} disabled={discover.isPending}>
+              <Icon name="search" />
+              {discover.isPending ? 'Finding…' : 'Find more HR'}
+            </button>
+          </div>
+        </div>
+      </section>
+      {filter === 'emailed' && (
+        <Notice tone="info">
+          <strong className="font-semibold">People you've already emailed.</strong> They're kept apart so nobody gets a second email by accident. After{' '}
+          {s?.repeatDays ?? 14} days a row shows <em>Can email again</em>; writing to them again asks you to confirm first.
+        </Notice>
+      )}
       {panel === 'add' && <AddContact onDone={() => (setPanel(null), refresh())} />}
       {panel === 'paste' && <PasteList onDone={refresh} onClose={() => setPanel(null)} />}
       {contacts.data && <HunterBox status={contacts.data.hunter} onFound={refresh} />}
 
-      {contacts.isPending && <p className="text-sm text-muted">Loading…</p>}
-      {contacts.isError && <p className="text-sm text-danger">{contacts.error.message}</p>}
+      {contacts.isPending && <TableSkeleton />}
+      {contacts.isError && <Notice tone="error">Couldn't load your contacts: {contacts.error.message}. Reload the page to try again.</Notice>}
       {contacts.data && !rows.length && (
-        <div className="panel px-6 py-14 text-center text-sm text-muted">
-          {all.length ? 'Nothing matches this filter.' : 'No HR contacts yet. Find more HR, look one up on Hunter, or add or paste ones you found.'}
+        <div className="panel px-6 py-14 text-center">
+          <p className="text-lg font-semibold tracking-tight">{all.length ? 'Nothing matches this filter' : 'Find your first HR contacts'}</p>
+          <p className="mx-auto mt-1 max-w-sm text-sm text-muted">
+            {all.length ? 'Pick another filter above or clear the search box.' : 'Press Find more HR, look one up on Hunter, or add or paste ones you found.'}
+          </p>
         </div>
       )}
 
@@ -189,10 +268,11 @@ export default function EmailPage({ onNavigate }) {
                 <th className="w-10 px-4 py-2">
                   <input
                     type="checkbox"
-                    aria-label="Select all"
+                    aria-label="Select everyone shown"
+                    title="Select everyone shown"
                     checked={allSelected}
-                    disabled={!pickable.length}
-                    onChange={() => setSelected(allSelected ? [] : pickable.slice(0, 25).map((c) => c._id))}
+                    disabled={!pagePickable.length}
+                    onChange={selectPage}
                   />
                 </th>
                 <th className="px-2 py-2 font-medium">Company</th>
@@ -204,13 +284,13 @@ export default function EmailPage({ onNavigate }) {
               </tr>
             </thead>
             <tbody className="divide-y divide-line">
-              {rows.map((c) => {
-                const st = stateOf(c);
+              {visible.map((c) => {
+                const st = stateOf(c, s?.repeatDays);
                 const canPick = st.canWrite || st.canSend;
                 const isOpen = openRow === c._id && c.mail;
                 return (
                   <Fragment key={c._id}>
-                    <tr className={selected.includes(c._id) ? 'bg-sunken' : undefined}>
+                    <tr className={`fade-in transition-colors ${selected.includes(c._id) ? 'bg-cobalt-soft/50' : 'hover:bg-sunken/50'}`}>
                       <td className="px-4 py-2.5 align-top">
                         <input
                           type="checkbox"
@@ -248,7 +328,10 @@ export default function EmailPage({ onNavigate }) {
                         {c.email ? <p className="break-all text-cobalt">{c.email}</p> : <p className="text-xs text-faint">{c.phone ?? '–'}</p>}
                         <p className="text-xs text-faint">{SOURCE[c.source]}{c.source === 'hunter' && ` ${c.confidence ?? '?'}%`}</p>
                       </td>
-                      <td className={`px-2 py-2.5 align-top text-xs font-medium ${st.tone}`}>{st.label}</td>
+                      <td className="px-2 py-2.5 align-top text-xs">
+                        <p className={`font-semibold ${st.tone}`}>{st.label}</p>
+                        {st.hint && <p className="mt-0.5 text-faint">{st.hint}</p>}
+                      </td>
                       <td className="px-2 py-2.5 text-right align-top whitespace-nowrap">
                         {c.mail && (
                           <button className="btn-ghost px-2 text-xs" onClick={() => setOpenRow(isOpen ? null : c._id)} aria-expanded={Boolean(isOpen)}>
@@ -274,26 +357,34 @@ export default function EmailPage({ onNavigate }) {
           </table>
         </div>
       )}
+      <Pager {...pager} noun="contacts" />
 
-      {contacts.data?.uncovered.length > 0 && <Uncovered companies={contacts.data.uncovered} hunter={contacts.data.hunter} onFound={refresh} />}
+
+      {repeat && <RepeatConfirm repeat={repeat} onClose={() => setRepeat(null)} />}
 
       {selected.length > 0 && (
-        <div className="fixed inset-x-0 bottom-0 z-20 border-t border-line bg-surface/95 px-4 py-3 backdrop-blur lg:left-60">
-          <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-3">
-            <span className="text-sm font-medium">{selected.length} selected</span>
-            <span className="text-xs text-muted">Sending approves them · one email per company per day</span>
+        <div className="fixed inset-x-0 bottom-0 z-20 border-t border-line bg-surface/90 px-4 py-3 shadow-[0_-8px_30px_rgba(0,0,0,0.08)] backdrop-blur-xl [animation:fade-up_200ms_ease-out] lg:left-64">
+          <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-3">
+            <span className="text-sm font-semibold">
+              {selected.length} of {MAX_PICK} selected
+            </span>
+            <span className="text-xs text-muted">
+              {toWrite.length > 0 && `${toWrite.length} to write · `}
+              {toSend.length > 0 && `${toSend.length} ready to send · `}
+              {s && `${Math.max(0, s.dailyLimit - s.sentLast24h)} sends left today`}
+            </span>
             <span className="ml-auto flex flex-wrap gap-2">
               <button className="btn-ghost" onClick={() => setSelected([])}>
                 Clear
               </button>
               {toWrite.length > 0 && (
-                <button className="btn-outline" disabled={write.isPending || s?.preparing || noPdf} onClick={() => write.mutate(toWrite.map((c) => c._id))}>
+                <button className="btn-outline" disabled={write.isPending || s?.preparing || noPdf} onClick={() => guard('write', toWrite, (list, confirmRepeat) => write.mutate({ ids: list.map((c) => c._id), confirmRepeat }))}>
                   <Icon name="sparkle" />
                   Write {toWrite.length} {toWrite.length === 1 ? 'email' : 'emails'}
                 </button>
               )}
               {toSend.length > 0 && (
-                <button className="btn" disabled={send.isPending || !s?.gmail} title={s?.gmail ? undefined : 'Connect Gmail first'} onClick={() => send.mutate(toSend.map((c) => c.mail._id))}>
+                <button className="btn" disabled={send.isPending || !s?.gmail} title={s?.gmail ? undefined : 'Connect your apply email in Settings first'} onClick={() => guard('send', toSend, (list, confirmRepeat) => send.mutate({ ids: list.map((c) => c.mail._id), confirmRepeat }))}>
                   <Icon name="mail" />
                   {send.isPending ? 'Sending…' : `Send ${toSend.length}`}
                 </button>
@@ -306,16 +397,26 @@ export default function EmailPage({ onNavigate }) {
   );
 }
 
-function Stat({ label, value, note, bar }) {
+function TableSkeleton() {
   return (
-    <div className="panel px-4 py-3">
-      <p className="text-xs text-muted">{label}</p>
-      <p className="font-display text-2xl font-semibold tracking-tight">{value}</p>
-      {bar != null && (
-        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-sunken">
-          <div className="h-full rounded-full bg-ok" style={{ width: `${bar * 100}%` }} />
+    <div className="panel divide-y divide-line" aria-label="Loading contacts">
+      {[0, 1, 2, 3, 4].map((i) => (
+        <div key={i} className="flex gap-4 px-4 py-3.5">
+          <div className="h-4 w-4 animate-pulse rounded bg-sunken" />
+          <div className="h-4 w-1/5 animate-pulse rounded bg-sunken" />
+          <div className="h-4 w-1/4 animate-pulse rounded bg-sunken" />
+          <div className="h-4 w-1/5 animate-pulse rounded bg-sunken" />
         </div>
-      )}
+      ))}
+    </div>
+  );
+}
+
+function Stat({ label, value, note }) {
+  return (
+    <div className="panel-status px-4 py-3">
+      <p className="text-xs font-medium text-muted">{label}</p>
+      <p className="text-2xl font-semibold tracking-tight">{value}</p>
       {note && <p className="mt-1 text-xs text-faint">{note}</p>}
     </div>
   );
@@ -329,7 +430,20 @@ function EmailEditor({ mail, profile, onChange }) {
   const dirty = draft.subject !== mail.subject || draft.body !== mail.body;
   const save = useMutation({ mutationFn: () => api(`/outreach/${mail._id}`, { method: 'PUT', body: draft }), onSuccess: onChange });
   const discard = useMutation({ mutationFn: () => api(`/outreach/${mail._id}`, { method: 'DELETE' }), onSuccess: onChange });
-  const error = save.error ?? discard.error;
+  const useOwn = useMutation({
+    meta: { inline: true, success: (r) => (r.useOriginal ? 'Your own resume PDF will be attached' : 'The tailored resume will be attached') },
+    mutationFn: (useOriginal) => api(`/outreach/${mail._id}/resume`, { method: 'PUT', body: { useOriginal } }),
+    onSuccess: onChange,
+  });
+  // Regenerate: AI writes it again in different words; optionally with what to change
+  const [wish, setWish] = useState('');
+  const [asking, setAsking] = useState(false);
+  const regenerate = useMutation({
+    meta: { success: 'New version written' },
+    mutationFn: (instruction) => api(`/outreach/${mail._id}/regenerate`, { method: 'POST', body: { instruction } }),
+    onSuccess: () => (setAsking(false), setWish(''), onChange()),
+  });
+  const error = save.error ?? discard.error ?? useOwn.error ?? regenerate.error;
 
   return (
     <div className="max-w-3xl space-y-3 text-sm">
@@ -355,6 +469,16 @@ function EmailEditor({ mail, profile, onChange }) {
           <textarea className="input font-sans leading-relaxed" rows={14} value={draft.body} onChange={(e) => setDraft({ ...draft, body: e.target.value })} />
           <p className="text-xs text-faint">Blank line = new paragraph, "- " = bullet, **text** = bold. Your signature and resume PDF are added automatically.</p>
         </>
+      ) : regenerate.isPending ? (
+        <div className="ai-working space-y-2 rounded-xl p-4" role="status">
+          <p className="flex items-center gap-2 font-semibold text-cobalt">
+            <Icon name="sparkle" className="size-4 animate-pulse text-pink" /> AI is rewriting this email…
+          </p>
+          <div className="skeleton h-3 w-11/12" />
+          <div className="skeleton h-3 w-10/12" />
+          <div className="skeleton h-3 w-8/12" />
+          <p className="text-xs text-faint">Usually 5–15 seconds; if Gemini is busy it waits and tries once more.</p>
+        </div>
       ) : (
         <EmailPreview body={draft.body} profile={profile} />
       )}
@@ -365,8 +489,33 @@ function EmailEditor({ mail, profile, onChange }) {
           ))}
         </ul>
       )}
+      {mail.jobId ? (
+        editable ? (
+          <TailorCard jobId={mail.jobId} useOriginal={mail.useOriginal} onUseOriginal={(useOriginal) => useOwn.mutate(useOriginal)} sendLabel="attached" />
+        ) : (
+          <p className="text-xs text-muted">{mail.resumePdfId ? 'Sent with a resume tailored to this job.' : 'Sent with your resume PDF.'}</p>
+        )
+      ) : (
+        <p className="rounded-lg bg-sunken px-3 py-2 text-xs text-muted">No job is linked to this contact, so there's no description to tailor to: your main resume PDF is attached.</p>
+      )}
       {mail.status === 'failed' && <p className="text-xs text-danger">Didn't send: {mail.error}</p>}
       {error && <p className="text-danger">{error.issues?.[0]?.message ?? error.message}</p>}
+      {editable && asking && !regenerate.isPending && (
+        <div className="pop-in flex flex-wrap gap-2 rounded-lg border border-line bg-paper p-3">
+          <input
+            className="input min-w-48 flex-1"
+            value={wish}
+            maxLength={200}
+            autoFocus
+            onChange={(e) => setWish(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && wish.trim() && regenerate.mutate(wish.trim())}
+            placeholder="What to change, e.g. “shorter” or “mention my React projects”"
+          />
+          <button className="btn" onClick={() => regenerate.mutate(wish.trim())} disabled={!wish.trim()}>
+            <Icon name="sparkle" /> Rewrite
+          </button>
+        </div>
+      )}
       {editable && (
         <div className="flex flex-wrap gap-2">
           {dirty && (
@@ -374,6 +523,14 @@ function EmailEditor({ mail, profile, onChange }) {
               {save.isPending ? 'Saving…' : 'Save changes'}
             </button>
           )}
+          <button className="btn-outline" onClick={() => regenerate.mutate('')} disabled={regenerate.isPending || dirty} title={dirty ? 'Save or discard your edits first' : 'A new version in different words'}>
+            <Icon name="undo" className="size-4 -scale-x-100" />
+            {regenerate.isPending ? 'Rewriting…' : 'Regenerate'}
+          </button>
+          <button className="btn-ghost" onClick={() => setAsking(!asking)} disabled={regenerate.isPending || dirty} aria-expanded={asking}>
+            <Icon name="sparkle" />
+            Change with instructions
+          </button>
           <button className="btn-ghost hover:text-danger" onClick={() => confirm('Discard this email?') && discard.mutate()} disabled={discard.isPending}>
             <Icon name="trash" />
             Discard
@@ -434,77 +591,10 @@ function EmailPreview({ body, profile }) {
   );
 }
 
-// Companies with active jobs and no HR contact yet: one click to look for one.
-function Uncovered({ companies, hunter, onFound }) {
-  const [busy, setBusy] = useState(null);
-  const [message, setMessage] = useState(null);
-  const run = async (key, fn) => {
-    setBusy(key);
-    setMessage(null);
-    try {
-      setMessage(await fn());
-      onFound();
-    } catch (err) {
-      setMessage(err.message);
-    } finally {
-      setBusy(null);
-    }
-  };
-  return (
-    <section className="mt-8">
-      <h2 className="font-display text-lg font-semibold tracking-tight">Active companies with no HR contact yet</h2>
-      <p className="text-sm text-muted">Your best-fit companies we have no email for. Look one up, or add a contact you found.</p>
-      {message && <p className="mt-2 text-sm text-muted">{message}</p>}
-      <ul className="mt-3 divide-y divide-line rounded-xl border border-line bg-surface text-sm">
-        {companies.map(({ company, jobs }) => (
-          <li key={company} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2">
-            <span className="font-medium">{company}</span>
-            <span className="min-w-0 flex-1 truncate text-muted">
-              {jobs[0].title} · fit {jobs[0].fit}
-              {jobs.length > 1 && ` · +${jobs.length - 1} more`}
-            </span>
-            <button
-              className="btn-ghost px-2 text-xs"
-              disabled={busy !== null}
-              onClick={() =>
-                run(`site-${company}`, async () => {
-                  const found = await api(`/jobs/${jobs[0].matchId}/contacts`, { method: 'POST' });
-                  return found.emails.length ? `${company}: found ${found.emails.length} email(s).` : `${company}: ${found.note ?? 'no email in the job post or on its website'}`;
-                })
-              }
-            >
-              {busy === `site-${company}` ? 'Checking…' : 'Check job post & website'}
-            </button>
-            {hunter.configured && (
-              <button
-                className="btn-ghost px-2 text-xs"
-                disabled={busy !== null || hunter.used >= hunter.limit}
-                onClick={() =>
-                  run(`hunter-${company}`, async () => {
-                    const r = await api('/contacts/hunter', { method: 'POST', body: { company, jobId: String(jobs[0].jobId) } });
-                    return `${company}: ${r.contacts.length} HR contact(s) from Hunter${r.cached ? ' (earlier lookup, no credit used)' : ''}.`;
-                  })
-                }
-              >
-                {busy === `hunter-${company}` ? 'Looking up…' : 'Find on Hunter'}
-              </button>
-            )}
-          </li>
-        ))}
-      </ul>
-    </section>
-  );
-}
-
 function HunterBox({ status, onFound }) {
   const [form, setForm] = useState({ domain: '', company: '' });
-  const look = useMutation({ mutationFn: () => api('/contacts/hunter', { method: 'POST', body: form }), onSuccess: onFound });
-  if (!status.configured)
-    return (
-      <p className="mb-4 rounded-xl border border-dashed border-line px-4 py-3 text-sm text-muted">
-        To look up HR people by company, create a free Hunter.io account and add <code>HUNTER_API_KEY</code> to <code>server/.env</code>.
-      </p>
-    );
+  const look = useMutation({ meta: { inline: true }, mutationFn: () => api('/contacts/hunter', { method: 'POST', body: form }), onSuccess: onFound });
+  if (!status.configured) return null; // optional (HUNTER_API_KEY on the server): nothing to show without it
   return (
     <form
       className="panel mb-4 flex flex-wrap items-end gap-3 px-5 py-4"
@@ -535,7 +625,7 @@ function HunterBox({ status, onFound }) {
 
 function AddContact({ onDone }) {
   const [form, setForm] = useState({ company: '', name: '', position: '', email: '', phone: '', jobTitle: '' });
-  const add = useMutation({ mutationFn: () => api('/contacts', { method: 'POST', body: form }), onSuccess: onDone });
+  const add = useMutation({ meta: { inline: true }, mutationFn: () => api('/contacts', { method: 'POST', body: form }), onSuccess: onDone });
   const field = (key, label, props = {}) => (
     <label className="block">
       <span className="text-xs font-medium text-muted">{label}</span>
@@ -574,7 +664,7 @@ function AddContact({ onDone }) {
 
 function PasteList({ onDone, onClose }) {
   const [text, setText] = useState('');
-  const paste = useMutation({ mutationFn: () => api('/contacts/import', { method: 'POST', body: { text } }), onSuccess: (r) => (r.added && setText(''), onDone()) });
+  const paste = useMutation({ meta: { inline: true }, mutationFn: () => api('/contacts/import', { method: 'POST', body: { text } }), onSuccess: (r) => (r.added && setText(''), onDone()) });
   return (
     <form
       className="panel mb-4 space-y-3 p-5"
@@ -611,5 +701,50 @@ function PasteList({ onDone, onClose }) {
         {paste.isError && <span className="text-sm text-danger">{paste.error.message}</span>}
       </div>
     </form>
+  );
+}
+
+// "You emailed these people before": shown before writing or sending to anyone who already got an email from you.
+function RepeatConfirm({ repeat, onClose }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    ref.current?.showModal();
+  }, []);
+  const { action, list, go } = repeat;
+  const again = list.filter((c) => c.lastContactedAt);
+  const others = list.filter((c) => !c.lastContactedAt);
+  const run = (people, confirmRepeat) => (go(people, confirmRepeat), ref.current?.close());
+  return (
+    <dialog ref={ref} className="dialog w-[min(32rem,calc(100%-2rem))]" onClose={onClose} aria-labelledby="repeat-title">
+      <h2 id="repeat-title" className="section-title">
+        Email {again.length === 1 ? 'this person' : `these ${again.length} people`} again?
+      </h2>
+      <p className="section-desc">You already emailed them. A second email is fine when you have something new to say, like a new role or a follow-up.</p>
+      <ul className="mt-4 max-h-60 space-y-2 overflow-y-auto">
+        {again.map((c) => (
+          <li key={c._id} className="rounded-lg border border-line bg-paper px-3 py-2 text-sm">
+            <p className="font-semibold">{c.company}</p>
+            <p className="text-muted">
+              {c.name ? `${c.name} · ` : ''}
+              {c.email}
+            </p>
+            <p className="text-xs text-faint">Last emailed {shortDate(c.lastContactedAt)}</p>
+          </li>
+        ))}
+      </ul>
+      <div className="mt-6 flex flex-wrap justify-end gap-2 border-t border-line pt-4">
+        <button type="button" className="btn-ghost" onClick={() => ref.current?.close()}>
+          Cancel
+        </button>
+        {others.length > 0 && (
+          <button type="button" className="btn-outline" onClick={() => run(others, false)}>
+            Only the {others.length} new
+          </button>
+        )}
+        <button type="button" className="btn" onClick={() => run(list, true)}>
+          {action === 'write' ? 'Write' : 'Send'} {others.length ? `all ${list.length}` : 'again'}
+        </button>
+      </div>
+    </dialog>
   );
 }

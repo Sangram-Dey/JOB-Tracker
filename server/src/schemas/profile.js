@@ -13,7 +13,11 @@ export const ProfileSchema = z.object({
     email: text,
     phone: text,
     location: text,
-    links: z.array(text).describe('LinkedIn, GitHub, portfolio and other URLs'),
+    // default: profiles saved before these fields existed still validate
+    linkedin: text.default('').describe('LinkedIn profile URL, or ""'),
+    github: text.default('').describe('GitHub profile URL, or ""'),
+    portfolio: text.default('').describe('Personal website or portfolio URL, or ""'),
+    links: z.array(text).describe('Any other URLs (not LinkedIn, GitHub or portfolio)'),
   }),
   headline: text.describe('Short professional title, e.g. "Full Stack Developer"'),
   summary: text,
@@ -49,3 +53,22 @@ export const ProfileSchema = z.object({
   ),
   certifications: z.array(text),
 });
+
+// Older profiles kept every URL in `links`: move LinkedIn / GitHub / the first other URL into their own fields.
+export function withNamedLinks(data) {
+  const c = data?.contact;
+  if (!c) return data;
+  const rest = [...(c.links ?? [])];
+  const take = (current, re) => {
+    if (current) return current;
+    const i = rest.findIndex((l) => re.test(l));
+    return i < 0 ? '' : rest.splice(i, 1)[0];
+  };
+  const linkedin = take(c.linkedin, /linkedin\.com/i);
+  const github = take(c.github, /github\.com/i);
+  const portfolio = take(c.portfolio, /./);
+  return { ...data, contact: { ...c, linkedin, github, portfolio, links: rest } };
+}
+
+// Every link, named ones first: for email signatures and the AI.
+export const allLinks = (c = {}) => [...new Set([c.linkedin, c.github, c.portfolio, ...(c.links ?? [])].filter(Boolean))];

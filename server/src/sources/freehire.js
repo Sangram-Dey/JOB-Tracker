@@ -5,6 +5,7 @@ import { toJob, countryCode } from '../jobs/normalize.js';
 // Arc, Workday, Lever and more, with country / city / work-mode filters. API notes taken from the
 // reference repo's .agents/skills/freehire-search/url-reference.md.
 const BASE = 'https://freehire.me/api/v1/agent/jobs/search';
+export const minGapMs = 3600_000; // a free API: at most once an hour per user
 const MODES = { remote: 'remote', hybrid: 'hybrid', onsite: 'onsite' };
 
 // Which calls to make for these preferences. Each call is one { label, run } task.

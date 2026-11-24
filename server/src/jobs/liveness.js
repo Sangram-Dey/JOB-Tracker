@@ -6,8 +6,9 @@ import { assertPublicHost, robotsDisallows } from './contacts.js';
 //   closed  : the page is gone (404/410) or says the job is closed; hidden from your feed
 //   unknown : blocked, timed out, or robots.txt asks bots not to open it; still shown
 
-// Company board APIs only return open jobs, so their listings are live by definition.
-const LIVE_BY_API = new Set(['greenhouse', 'lever', 'ashby']);
+// Company board APIs only return open jobs, so their listings are live by definition. Apify jobs were just scraped
+// as open, and skipping them means this server never opens naukri.com / indeed.com pages for them.
+const LIVE_BY_API = new Set(['greenhouse', 'lever', 'ashby', 'apify']);
 
 const CLOSED = [
   /\bjob (?:is )?no longer (?:available|open|active)\b/i,

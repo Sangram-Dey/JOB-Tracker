@@ -18,7 +18,7 @@ router.use(requireAuth);
 
 async function myResume(userId) {
   const profile = await Profile.findOne({ userId });
-  if (!profile?.resumePdf?.id) throw httpError(400, 'Upload your resume PDF on the Profile page first');
+  if (!profile?.resumePdf?.id) throw httpError(400, 'Upload your resume PDF in Settings first');
   const pdf = await pdfText(await readPdf(profile.resumePdf.id)).catch(() => {
     throw httpError(400, 'That PDF could not be read; export it again from Word or Google Docs');
   });

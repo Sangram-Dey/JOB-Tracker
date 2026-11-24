@@ -3,34 +3,48 @@
 /* dark: utilities follow the .dark class that next-themes sets, not only the OS setting. */
 @custom-variant dark (&:where(.dark, .dark *));
 
-/* Colour tokens. Components use the names (bg-surface, text-muted…), so dark mode is just a second set of values. */
+/* Colour tokens: Ink & Teal. Components use the names (bg-surface, text-muted…), so dark mode is a second set of values.
+   Every text colour passes WCAG AA (4.5:1) on paper, surface and sunken in both modes.
+   Names are kept from earlier themes: cobalt = the teal accent, pink = the AI colour (violet). */
 :root {
-  --paper: #f3f5f8; /* page background */
-  --surface: #ffffff; /* panels */
-  --sunken: #edf0f5; /* hover, expanded rows */
-  --ink: #14203a; /* text and primary buttons */
-  --muted: #5c6579;
-  --faint: #8a93a6;
-  --line: #dee3ec;
-  --cobalt: #2445c2; /* links, focus */
-  --marigold: #d9980a; /* "fresh" and "unsaved": things that need your eye */
-  --marigold-soft: #fdf3d7;
-  --danger: #c2362b;
-  --ok: #1f7a4d;
+  --paper: #f7f9fa; /* page background */
+  --surface: #ffffff; /* cards and panels */
+  --sunken: #eef2f4; /* hover, expanded rows, table headers */
+  --ink: #0f1b24; /* main text */
+  --muted: #475569; /* descriptions */
+  --faint: #56657a; /* hints, dates, small print */
+  --line: #dde3e8; /* borders */
+  --cobalt: #0f766e; /* teal: primary actions, links, focus, where you are */
+  --cobalt-soft: #e0f2f1;
+  --on-accent: #ffffff; /* text on teal, violet or green fills */
+  --pink: #6d28d9; /* AI: fit scores, tailored resumes, AI-written things */
+  --pink-soft: #ede9fe;
+  --ok: #166534; /* success, progress */
+  --ok-soft: #dcfce7;
+  --marigold: #92400e; /* warnings: limits, things that need your eye */
+  --marigold-soft: #fef3c7;
+  --danger: #b91c1c;
+  --danger-soft: #fee2e2;
 }
 .dark {
-  --paper: #0d1322;
-  --surface: #141c2f;
-  --sunken: #1a2338;
-  --ink: #e6ebf4;
-  --muted: #9aa4ba;
-  --faint: #6e7891;
-  --line: #253049;
-  --cobalt: #93a9ff;
-  --marigold: #f2b632;
-  --marigold-soft: #3a2e10;
-  --danger: #ff8a7f;
-  --ok: #6fd3a0;
+  --paper: #0b1418;
+  --surface: #111d22;
+  --sunken: #18262c;
+  --ink: #e6eef1;
+  --muted: #a3b3ba;
+  --faint: #879aa2;
+  --line: #23343b;
+  --cobalt: #2dd4bf;
+  --cobalt-soft: #0f3a3a;
+  --on-accent: #0b1418;
+  --pink: #c4b5fd;
+  --pink-soft: #2e1f55;
+  --ok: #4ade80;
+  --ok-soft: #0f3d26;
+  --marigold: #fbbf24;
+  --marigold-soft: #3a2a0a;
+  --danger: #f87171;
+  --danger-soft: #4a1515;
 }
 
 @theme inline {
@@ -42,16 +56,32 @@
   --color-faint: var(--faint);
   --color-line: var(--line);
   --color-cobalt: var(--cobalt);
+  --color-cobalt-soft: var(--cobalt-soft);
+  --color-on-accent: var(--on-accent);
+  --color-pink: var(--pink);
+  --color-pink-soft: var(--pink-soft);
+  --color-ok-soft: var(--ok-soft);
+  --color-danger-soft: var(--danger-soft);
   --color-marigold: var(--marigold);
   --color-marigold-soft: var(--marigold-soft);
   --color-danger: var(--danger);
   --color-ok: var(--ok);
-  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
-  --font-display: "Bricolage Grotesque", "IBM Plex Sans", ui-sans-serif, sans-serif;
+  /* One readable family everywhere; headings differ by size and weight, not by font. */
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Inter", ui-sans-serif, system-ui, sans-serif;
+  /* Smallest text is 13px (was 12px): dates, counts and hints stay readable. */
+  --text-xs: 0.8125rem;
+  --text-xs--line-height: 1.25rem;
 }
 
 body {
   @apply bg-paper font-sans text-ink antialiased;
+  font-feature-settings: "cv11", "ss01"; /* Inter's clearer 1, l and a */
+}
+/* Numbers line up in stats, counts and tables. */
+.tabular-nums,
+table {
+  font-variant-numeric: tabular-nums;
 }
 :focus-visible {
   outline: 2px solid var(--cobalt);
@@ -62,23 +92,112 @@ body {
   .input {
     @apply w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm text-ink placeholder:text-faint focus:border-cobalt focus:ring-2 focus:ring-cobalt/20 focus:outline-none;
   }
+  /* Buttons: one height and shape everywhere. Primary = solid teal (one per section); outline = secondary;
+     ghost = quiet; danger = destructive. */
   .btn {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg bg-ink px-4 py-2 text-sm font-medium text-surface transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40;
+    @apply inline-flex items-center justify-center gap-2 rounded-lg bg-cobalt px-4 py-2 text-sm font-semibold text-on-accent shadow-sm transition hover:bg-cobalt/90 active:bg-cobalt disabled:cursor-not-allowed disabled:opacity-50;
   }
   .btn-outline {
-    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-line bg-surface px-3 py-1.5 text-sm font-medium text-ink hover:border-muted disabled:opacity-40;
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-line bg-surface px-3.5 py-2 text-sm font-semibold text-ink shadow-sm transition hover:border-cobalt hover:text-cobalt disabled:cursor-not-allowed disabled:opacity-50;
   }
   .btn-ghost {
-    @apply inline-flex items-center gap-2 rounded-lg px-3 py-1.5 text-sm text-muted hover:bg-sunken hover:text-ink disabled:opacity-40;
+    @apply inline-flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium text-muted transition hover:bg-sunken hover:text-ink disabled:cursor-not-allowed disabled:opacity-50;
   }
+  .btn-danger {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg border border-danger/40 bg-surface px-3.5 py-2 text-sm font-semibold text-danger transition hover:bg-danger-soft disabled:opacity-50;
+  }
+  /* Popups: native <dialog>, faded and lifted in. */
+  .dialog {
+    @apply m-auto w-[min(28rem,calc(100%-2rem))] rounded-xl border border-line bg-surface p-6 text-ink shadow-xl backdrop:bg-black/50;
+  }
+  .dialog[open] {
+    animation: pop-in 180ms ease-out;
+  }
+  .fade-in {
+    animation: fade-up 200ms ease-out both;
+  }
+  /* Cards: solid, a hairline border and the lightest shadow. */
   .panel {
-    @apply rounded-2xl border border-line bg-surface;
+    @apply rounded-xl border border-line bg-surface shadow-[0_1px_2px_rgb(15_27_36/0.05)];
+  }
+  /* Filters and toolbars: a tinted tray, no shadow, so they read as controls, not content. */
+  .panel-controls {
+    @apply rounded-xl border border-line bg-sunken;
+  }
+  /* Status cards (limits, last update, today): white with a teal top edge. */
+  .panel-status {
+    @apply rounded-xl border border-t-2 border-line border-t-cobalt bg-surface shadow-[0_1px_2px_rgb(15_27_36/0.05)];
+  }
+  /* Instructions (How it works, How to, Tip): soft teal. */
+  .panel-info {
+    @apply rounded-xl border border-cobalt/25 bg-cobalt-soft/50;
+  }
+  /* Section headings inside cards, and the line of description under them. */
+  .section-title {
+    @apply text-base font-semibold tracking-tight text-ink;
+  }
+  .section-desc {
+    @apply mt-0.5 text-sm text-muted;
+  }
+  /* AI at work: a slowly turning teal-violet border (the card keeps its own background). */
+  .ai-working {
+    border: 1.5px solid transparent;
+    background: linear-gradient(var(--surface), var(--surface)) padding-box, conic-gradient(from var(--ai-angle), var(--cobalt), var(--pink), var(--cobalt) 60%, var(--line) 75%, var(--cobalt)) border-box;
+    animation: ai-spin 3s linear infinite;
+  }
+  /* chips and lines that arrive one after another: set --i on each */
+  .pop-in {
+    animation: pop-in 260ms ease-out both;
+    animation-delay: calc(var(--i, 0) * 60ms);
+  }
+  .skeleton {
+    @apply rounded bg-sunken;
+    background-image: linear-gradient(90deg, transparent, color-mix(in srgb, var(--cobalt) 10%, transparent), transparent);
+    background-size: 200% 100%;
+    animation: sweep 1.4s ease-in-out infinite;
   }
   .label {
     @apply block text-sm font-medium text-ink;
   }
   .help {
     @apply text-sm text-muted;
+  }
+}
+
+@keyframes pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.97);
+  }
+}
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+}
+@property --ai-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+@keyframes ai-spin {
+  to {
+    --ai-angle: 360deg;
+  }
+}
+@keyframes sweep {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
   }
 }
 
@@ -89,4 +208,9 @@ body {
     transition: none !important;
     animation: none !important;
   }
+}
+
+input[type='checkbox'],
+input[type='radio'] {
+  accent-color: var(--cobalt);
 }

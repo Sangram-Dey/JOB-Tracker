@@ -3,6 +3,7 @@ import mammoth from 'mammoth';
 import { ProfileSchema } from '../schemas/profile.js';
 import { httpError } from '../utils/httpError.js';
 import { generateJson } from './gemini.js';
+import { pdfText } from '../resume/atsCheck.js';
 
 export const PDF = 'application/pdf';
 export const DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
@@ -24,13 +25,24 @@ async function docxToText(buffer) {
   }
 }
 
-// Turns an uploaded resume (PDF, DOCX, image or text) into a profile object.
-// Gemini reads PDFs and images directly. For DOCX, mammoth pulls out the text first.
-export async function parseResume(file) {
+// What Gemini gets for an uploaded resume (PDF, DOCX, image or text).
+// A PDF with real text goes as text plus its clickable links: much faster than Gemini reading the pages as images.
+// Scanned PDFs (no text) and images are sent as files; DOCX text comes from mammoth.
+export async function resumePart(file) {
+  if (file.mimetype === PDF) {
+    const pdf = await pdfText(file.buffer).catch(() => null);
+    if (pdf?.text.length > 200) {
+      const links = pdf.links.length ? `\n\nLinks in the resume:\n${pdf.links.join('\n')}` : '';
+      return { text: `<resume>\n${pdf.text}${links}\n</resume>` };
+    }
+  }
+  if (file.mimetype === PDF || IMAGES.includes(file.mimetype)) return createPartFromBase64(file.buffer.toString('base64'), file.mimetype);
   const text = file.mimetype === DOCX ? await docxToText(file.buffer) : file.buffer.toString('utf8');
-  const resume =
-    file.mimetype === PDF || IMAGES.includes(file.mimetype)
-      ? createPartFromBase64(file.buffer.toString('base64'), file.mimetype)
-      : { text: `<resume>\n${text}\n</resume>` };
-  return generateJson({ system: SYSTEM, parts: [resume, { text: 'Extract this resume.' }], schema: ProfileSchema, what: 'read this resume' });
+  return { text: `<resume>\n${text}\n</resume>` };
+}
+
+// Turns an uploaded resume into a profile object.
+export async function parseResume(file) {
+  const parts = [await resumePart(file), { text: 'Extract this resume.' }];
+  return generateJson({ system: SYSTEM, parts, schema: ProfileSchema, what: 'read this resume', thinking: 'low' });
 }

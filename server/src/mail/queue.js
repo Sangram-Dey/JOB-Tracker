@@ -2,7 +2,9 @@ import { Application } from '../models/Application.js';
 import { Contact } from '../models/Contact.js';
 import { Profile } from '../models/Profile.js';
 import { readPdf } from '../resume/storage.js';
+import { tailoredPdfFor, tailoringOn } from '../resume/tailorJob.js';
 import { sendEmail } from './send.js';
+import { syncTracked } from '../tracker/track.js';
 import { toHtml, toText } from './format.js';
 
 // Approved emails you clicked Send on go out one at a time, spaced apart, at most DAILY_LIMIT in 24 hours.
@@ -17,11 +19,15 @@ export const sentInLastDay = (userId) => Application.countDocuments({ userId, st
 
 async function sendOne(app, profile) {
   try {
-    const pdfId = profile?.resumePdf?.id;
-    if (!pdfId) throw new Error('Upload your resume PDF on the Profile page, then send again');
+    // the resume tailored to this email's job (made when the email was written; waited for if still running)
+    const tailored = app.jobId && !app.useOriginal && tailoringOn(profile) ? await tailoredPdfFor(app.userId, app.jobId) : null;
+    const pdfId = tailored ?? profile?.resumePdf?.id;
+    if (!pdfId) throw new Error('Upload your resume PDF in Settings, then send again');
+    app.resumePdfId = tailored ?? undefined;
     const fromName = profile.data?.contact?.name;
     const filename = `${(fromName || 'Resume').replace(/[^\w .-]+/g, '')} - Resume.pdf`;
     app.messageId = await sendEmail({
+      userId: app.userId,
       fromName,
       to: app.to,
       subject: app.subject,
@@ -38,6 +44,7 @@ async function sendOne(app, profile) {
     app.error = err.message?.slice(0, 300) ?? 'Sending failed';
   }
   await app.save();
+  if (app.status === 'sent') await syncTracked(app.userId); // its Tracker card appears now
 }
 
 // Works through one user's queue in the background. Safe to call often: one worker per user.
@@ -50,7 +57,7 @@ export async function processQueue(userId) {
       const next = await Application.findOne({ userId, status: 'queued' }).sort({ updatedAt: 1 });
       if (!next) break;
       // read each time, so a PDF you replace mid-queue is the one that goes out
-      await sendOne(next, await Profile.findOne({ userId }, 'data.contact resumePdf'));
+      await sendOne(next, await Profile.findOne({ userId }, 'data.contact resumePdf preferences'));
       if (await Application.exists({ userId, status: 'queued' })) await sleep(GAP_MS);
     }
   } finally {

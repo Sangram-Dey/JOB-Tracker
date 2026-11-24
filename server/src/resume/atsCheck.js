@@ -9,9 +9,11 @@ import { phonesIn } from '../jobs/contacts.js';
 export async function pdfText(buffer) {
   const doc = await getDocument({ data: new Uint8Array(buffer), isEvalSupported: false, useSystemFonts: true }).promise;
   const lines = [];
+  const links = new Set(); // clickable links: "LinkedIn" on the page is often a link to the real URL
   let splitLines = 0; // lines with a wide gap in the middle: two columns or a table
   for (let p = 1; p <= doc.numPages; p++) {
     const page = await doc.getPage(p);
+    for (const note of await page.getAnnotations()) if (/^https?:\/\//i.test(note.url ?? '')) links.add(note.url);
     const width = page.getViewport({ scale: 1 }).width;
     const rows = new Map(); // rounded y -> items on that line
     for (const item of (await page.getTextContent()).items) {
@@ -27,7 +29,7 @@ export async function pdfText(buffer) {
   }
   const pages = doc.numPages;
   await doc.destroy();
-  return { text: lines.join('\n'), lines, pages, splitLines };
+  return { text: lines.join('\n'), lines, pages, splitLines, links: [...links] };
 }
 
 // Skills recruiters search for, each with the spellings people write. `name` is the usual search wording.
